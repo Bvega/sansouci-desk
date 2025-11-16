@@ -1,344 +1,309 @@
-<?php 
+<?php
 ob_start();
-require 'config.php';
+
+require __DIR__ . '/config.php';
 require 'header.php';
 
-// === VERIFICAR USUARIO ===
-if(!isset($user) || !is_array($user) || empty($user['email'])) {
-    header("Location: login.php");
+// --- Verificar usuario autenticado ---
+if (!isset($user) || !is_array($user) || empty($user['email'])) {
+    header('Location: login.php');
     exit();
 }
 
-// === OBTENER IDs SELECCIONADOS ===
+// --- Obtener IDs de tickets seleccionados ---
 $ids = [];
-if(isset($_GET['ids'])){
+
+// Desde GET (cuando venimos de tickets.php)
+if (isset($_GET['ids']) && $_GET['ids'] !== '') {
     $ids_raw = explode(',', $_GET['ids']);
-    foreach($ids_raw as $id){
-        $id = intval($id);
-        if($id > 0) $ids[] = $id;
+    foreach ($ids_raw as $id) {
+        $id = (int) trim($id);
+        if ($id > 0) {
+            $ids[] = $id;
+        }
     }
 }
-if(empty($ids)){
-    header('Location: tickets.php');
+
+// Desde POST (cuando enviamos el formulario de modificación)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ids']) && is_array($_POST['ids'])) {
+    $ids = [];
+    foreach ($_POST['ids'] as $id) {
+        $id = (int) $id;
+        if ($id > 0) {
+            $ids[] = $id;
+        }
+    }
+}
+
+$ids = array_values(array_unique($ids));
+
+if (empty($ids)) {
+    ?>
+    <h1 class="text-4xl font-bold text-blue-900 mb-6">Modificación masiva</h1>
+    <div class="bg-red-100 border border-red-400 text-red-800 px-6 py-4 rounded-xl text-lg">
+        No se recibieron tickets válidos para modificar. Vuelve a la lista y selecciona al menos uno.
+    </div>
+    <div class="mt-6">
+        <a href="tickets.php" class="inline-block px-6 py-3 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700">
+            Volver a Tickets
+        </a>
+    </div>
+    <?php
+    require 'footer.php';
+    ob_end_flush();
     exit();
 }
 
-// === CARGAR VALORES ACTUALES (PARA PRESELECCIONAR) ===
-$valores_actuales = ['estado' => '', 'prioridad' => '', 'tipo_servicio' => '', 'agente_id' => ''];
-$tickets_seleccionados = [];
-$primer_ticket = null;
+// --- Cargar tickets seleccionados para mostrar resumen ---
+$placeholders = implode(',', array_fill(0, count($ids), '?'));
+$stmt = $pdo->prepare("
+    SELECT t.*
+    FROM tickets t
+    WHERE t.id IN ($placeholders)
+    ORDER BY t.creado_el DESC
+");
+$stmt->execute($ids);
+$tickets_seleccionados = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-if(count($ids) === 1){
-    $stmt = $pdo->prepare("SELECT t.*, u.nombre as agente_nombre FROM tickets t LEFT JOIN users u ON t.agente_id = u.id WHERE t.id = ?");
-    $stmt->execute([$ids[0]]);
-    $primer_ticket = $stmt->fetch(PDO::FETCH_ASSOC);
-    if($primer_ticket){
-        $valores_actuales = [
-            'estado' => $primer_ticket['estado'],
-            'prioridad' => $primer_ticket['prioridad'],
-            'tipo_servicio' => $primer_ticket['tipo_servicio'],
-            'agente_id' => $primer_ticket['agente_id']
-        ];
-        $tickets_seleccionados = [$primer_ticket];
-    }
-} else {
-    $in = str_repeat('?,', count($ids) - 1) . '?';
-    $stmt = $pdo->prepare("SELECT t.*, u.nombre as agente_nombre FROM tickets t LEFT JOIN users u ON t.agente_id = u.id WHERE t.id IN ($in)");
-    $stmt->execute($ids);
-    $tickets_seleccionados = $stmt->fetchAll(PDO::FETCH_ASSOC);
+// --- Cargar listas auxiliares (agentes y tipos de servicio) ---
 
-    if(!empty($tickets_seleccionados)){
-        $primer = $tickets_seleccionados[0];
+// Agentes (agente / admin / superadmin)
+$agentes = [];
+try {
+    $stmtAg = $pdo->query("
+        SELECT id, nombre, rol
+        FROM users
+        WHERE rol IN ('agente','administrador','superadmin')
+        ORDER BY nombre
+    ");
+    $agentes = $stmtAg->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Throwable $e) {
+    $agentes = [];
+}
+
+// Tipos de servicio (texto, como en la columna tipo_servicio de tickets)
+$tipos_servicio = [];
+try {
+    $stmtTs = $pdo->query("SELECT nombre FROM tipos_servicio ORDER BY nombre");
+    $tipos_servicio = $stmtTs->fetchAll(PDO::FETCH_COLUMN) ?: [];
+} catch (Throwable $e) {
+    $tipos_servicio = [];
+}
+
+// --- Intentar precargar valores comunes si todos los tickets comparten el mismo ---
+$valores_actuales = [
+    'estado'        => '',
+    'prioridad'     => '',
+    'tipo_servicio' => '',
+    'agente_id'     => '',
+];
+
+if (count($tickets_seleccionados) === 1) {
+    $t = $tickets_seleccionados[0];
+    $valores_actuales['estado']        = $t['estado']        ?? '';
+    $valores_actuales['prioridad']     = $t['prioridad']     ?? '';
+    $valores_actuales['tipo_servicio'] = $t['tipo_servicio'] ?? '';
+    $valores_actuales['agente_id']     = $t['agente_id']     ?? '';
+} elseif (count($tickets_seleccionados) > 1) {
+    $primer = $tickets_seleccionados[0];
+    foreach (array_keys($valores_actuales) as $campo) {
         $todos_iguales = true;
-        foreach($tickets_seleccionados as $t){
-            if($t['estado'] !== $primer['estado'] || 
-               $t['prioridad'] !== $primer['prioridad'] || 
-               $t['tipo_servicio'] !== $primer['tipo_servicio'] || 
-               $t['agente_id'] !== $primer['agente_id']){
+        $valor_ref     = $primer[$campo] ?? null;
+        foreach ($tickets_seleccionados as $t) {
+            if (($t[$campo] ?? null) !== $valor_ref) {
                 $todos_iguales = false;
                 break;
             }
         }
-        if($todos_iguales){
-            $valores_actuales = [
-                'estado' => $primer['estado'],
-                'prioridad' => $primer['prioridad'],
-                'tipo_servicio' => $primer['tipo_servicio'],
-                'agente_id' => $primer['agente_id']
-            ];
-            $primer_ticket = $primer;
+        if ($todos_iguales) {
+            $valores_actuales[$campo] = $valor_ref;
         }
     }
 }
 
-// === CARGAR CONFIG EMAIL ===
-$config_email = [
-    'smtp_host' => '',
-    'smtp_port' => 587,
-    'smtp_usuario' => '',
-    'smtp_clave' => '',
-    'smtp_encriptacion' => 'tls',
-    'smtp_from_email' => 'soporte@sansouci.com.do',
-    'smtp_from_name' => 'Sansouci Desk',
-    'correos_notificacion' => '',
-    'activado' => 0
-];
+// --- Procesar formulario de actualización ---
+$mensaje = '';
+$tipo_mensaje = 'info';
 
-try {
-    $stmt = $pdo->query("SELECT * FROM config_email WHERE id = 1");
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if(is_array($row)){
-        $config_email = array_merge($config_email, $row);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['accion']) && $_POST['accion'] === 'aplicar_cambios') {
+
+    $estado_nuevo        = $_POST['estado']        ?? '';
+    $prioridad_nueva     = $_POST['prioridad']     ?? '';
+    $tipo_servicio_nuevo = $_POST['tipo_servicio'] ?? '';
+    $agente_id_nuevo     = $_POST['agente_id']     ?? '';
+
+    $set = [];
+    $paramsUpdate = [];
+
+    if ($estado_nuevo !== '') {
+        $set[]          = 'estado = ?';
+        $paramsUpdate[] = $estado_nuevo;
     }
-} catch(Exception $e) {}
-
-// === PROCESAR ACTUALIZACIÓN ===
-if($_POST){
-    $estado = $_POST['estado'] ?? '';
-    $prioridad = $_POST['prioridad'] ?? '';
-    $tipo_servicio = $_POST['tipo_servicio'] ?? '';
-    $agente_id = !empty($_POST['agente_id']) ? intval($_POST['agente_id']) : null;
-    $respuesta = trim($_POST['respuesta'] ?? '');
-
-    $in = str_repeat('?,', count($ids) - 1) . '?';
-    
-    $sql = "UPDATE tickets SET estado=?, prioridad=?, tipo_servicio=?";
-    $params = [$estado, $prioridad, $tipo_servicio];
-    
-    if($agente_id !== null){
-        $sql .= ", agente_id=?";
-        $params[] = $agente_id;
+    if ($prioridad_nueva !== '') {
+        $set[]          = 'prioridad = ?';
+        $paramsUpdate[] = $prioridad_nueva;
     }
-    
-    $sql .= " WHERE id IN ($in)";
-    $params = array_merge($params, $ids);
-    
-    try {
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
-    } catch(Exception $e) {
-        $error = "Error al actualizar: " . htmlspecialchars($e->getMessage());
+    if ($tipo_servicio_nuevo !== '') {
+        $set[]          = 'tipo_servicio = ?';
+        $paramsUpdate[] = $tipo_servicio_nuevo;
+    }
+    if ($agente_id_nuevo !== '') {
+        $set[]          = 'agente_id = ?';
+        $paramsUpdate[] = (int) $agente_id_nuevo;
     }
 
-    if(!empty($respuesta)){
-        $stmt_resp = $pdo->prepare("INSERT INTO respuestas (ticket_id, mensaje, autor, autor_email, creado_el) 
-                                    VALUES (?, ?, 'agente', ?, NOW())");
+    if (empty($set)) {
+        $mensaje      = 'No seleccionaste ningún cambio para aplicar.';
+        $tipo_mensaje = 'warning';
+    } else {
+        $set[] = 'actualizado_el = NOW()';
 
-        if(!empty($config_email['smtp_usuario']) && !empty($config_email['smtp_clave'])){
-            require 'phpmailer/src/Exception.php';
-            require 'phpmailer/src/PHPMailer.php';
-            require 'phpmailer/src/SMTP.php';
+        $sql = 'UPDATE tickets SET ' . implode(', ', $set) . ' WHERE id IN (' . $placeholders . ')';
+        $paramsUpdate = array_merge($paramsUpdate, $ids);
 
-            $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-            try {
-                $mail->isSMTP();
-                $mail->Host       = $config_email['smtp_host'];
-                $mail->SMTPAuth   = true;
-                $mail->Username   = $config_email['smtp_usuario'];
-                $mail->Password   = $config_email['smtp_clave'];
-                $mail->SMTPSecure = $config_email['smtp_encriptacion'] ?: false;
-                $mail->Port       = (int)$config_email['smtp_port'];
-                $mail->CharSet    = 'UTF-8';
+        try {
+            $stmtUpd = $pdo->prepare($sql);
+            $stmtUpd->execute($paramsUpdate);
+            $afectados = $stmtUpd->rowCount();
 
-                $mail->setFrom($config_email['smtp_usuario'], $config_email['smtp_from_name']);
-                $mail->addReplyTo($config_email['smtp_from_email'] ?: $config_email['smtp_usuario'], 'Sansouci Desk');
+            $mensaje      = $afectados . ' ticket(s) actualizados correctamente.';
+            $tipo_mensaje = 'success';
 
-                $in = str_repeat('?,', count($ids) - 1) . '?';
-                $stmt = $pdo->prepare("SELECT DISTINCT cliente_email FROM tickets WHERE id IN ($in)");
-                $stmt->execute($ids);
-                $clientes = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            // Recargar tickets para ver cambios
+            $stmt = $pdo->prepare("
+                SELECT t.*
+                FROM tickets t
+                WHERE t.id IN ($placeholders)
+                ORDER BY t.creado_el DESC
+            ");
+            $stmt->execute($ids);
+            $tickets_seleccionados = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-                foreach ($clientes as $cliente_email) {
-                    $mail->addAddress($cliente_email);
-                }
-
-                $destinos = array_filter(array_map('trim', explode(',', $config_email['correos_notificacion'] ?? '')));
-                foreach ($destinos as $to) {
-                    if($to && !in_array($to, $clientes)){
-                        $mail->addBCC($to);
-                    }
-                }
-
-                $mail->isHTML(true);
-                $mail->Subject = "Actualización masiva de tickets - Sansouci Desk";
-                $mail->Body = "
-                <div style='font-family: Arial, sans-serif; max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 15px 40px rgba(0,0,0,0.2); border: 5px solid #003087;'>
-                    <img src='https://www.sansouci.com.do/wp-content/uploads/2020/06/logo-sansouci.png' alt='Sansouci' style='height: 80px; display: block; margin: 0 auto 30px;'>
-                    <h1 style='color: #003087; text-align: center; font-size: 32px;'>ACTUALIZACIÓN MASIVA</h1>
-                    <p style='font-size: 20px; text-align: center; color: #333;'>
-                        Tus tickets han sido actualizados por el equipo de soporte.
-                    </p>
-                    <div style='background: #e6f7ff; padding: 30px; border-radius: 15px; margin: 30px 0; border-left: 8px solid #003087;'>
-                        <p style='font-size: 20px; color: #003087; font-weight: bold; margin-bottom: 20px;'>Mensaje del agente:</p>
-                        <p style='font-size: 18px; color: #333; line-height: 1.8;'>" . nl2br(htmlspecialchars($respuesta)) . "</p>
-                    </div>
-                    <div style='text-align: center; margin: 40px 0;'>
-                        <a href='http://localhost/sansouci-desk/portal_cliente.php?email=[EMAIL]' 
-                           style='background: #003087; color: white; padding: 20px 50px; text-decoration: none; border-radius: 50px; font-size: 24px; font-weight: bold; display: inline-block;'>
-                           VER MIS TICKETS
-                        </a>
-                    </div>
-                </div>";
-
-                $mail->send();
-            } catch (Exception $e) {}
-        }
-
-        foreach($ids as $id){
-            try {
-                $stmt_resp->execute([$id, $respuesta, $user['email']]);
-            } catch(Exception $e) {}
+        } catch (Throwable $e) {
+            $mensaje      = 'Ocurrió un problema al actualizar los tickets.';
+            $tipo_mensaje = 'error';
         }
     }
-
-    header("Location: tickets.php?msg=" . urlencode(count($ids) . " tickets actualizados"));
-    exit();
-}
-
-// === CARGAR DATOS PARA EL FORMULARIO ===
-try {
-    $agentes = $pdo->query("SELECT id, nombre FROM users WHERE rol IN ('agente','administrador') ORDER BY nombre")->fetchAll(PDO::FETCH_ASSOC);
-    $tipos = $pdo->query("SELECT nombre FROM tipos_servicio ORDER BY nombre")->fetchAll(PDO::FETCH_COLUMN);
-} catch(Exception $e) {
-    $agentes = [];
-    $tipos = [];
-    $error = "Error cargando datos: " . htmlspecialchars($e->getMessage());
 }
 ?>
+<h1 class="text-4xl font-bold text-blue-900 mb-6">Modificación masiva de tickets</h1>
 
-<div class="min-h-screen bg-gradient-to-br from-blue-50 to-blue-100">
-    <div class="max-w-5xl mx-auto p-6">
+<?php if ($mensaje): ?>
+    <?php
+    $classes = [
+        'success' => 'bg-green-100 border-green-400 text-green-800',
+        'error'   => 'bg-red-100 border-red-400 text-red-800',
+        'warning' => 'bg-yellow-100 border-yellow-400 text-yellow-800',
+        'info'    => 'bg-blue-100 border-blue-400 text-blue-800',
+    ];
+    $class = $classes[$tipo_mensaje] ?? $classes['info'];
+    ?>
+    <div class="mb-6 px-6 py-4 border rounded-xl text-lg <?= $class ?>">
+        <?= htmlspecialchars($mensaje) ?>
+    </div>
+<?php endif; ?>
 
-        <!-- ENCABEZADO SUPERIOR - IGUAL QUE EN RESPONDER -->
-        <?php if($primer_ticket): ?>
-        <div class="bg-white rounded-3xl shadow-2xl p-8 mb-8 border-4 border-blue-200">
-            <div class="flex justify-between items-start mb-6">
-                <div>
-                    <h1 class="text-4xl font-bold text-blue-900">#<?= htmlspecialchars($primer_ticket['numero'] ?? 'TCK-'.str_pad($primer_ticket['id'],5,'0',STR_PAD_LEFT)) ?></h1>
-                </div>
-                <div class="text-right">
-                    <span class="inline-block px-6 py-3 rounded-full text-lg font-bold <?= $primer_ticket['estado']=='en_proceso'?'bg-yellow-300 text-yellow-900':'bg-green-300 text-green-900' ?>">
-                        <?= ucfirst(str_replace('_',' ',$primer_ticket['estado'])) ?>
-                    </span>
-                    <p class="text-gray-600 text-lg mt-2"><?= date('d/m/Y H:i', strtotime($primer_ticket['creado_el'])) ?></p>
-                </div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <!-- Formulario de cambios -->
+    <div class="bg-white rounded-2xl shadow-lg p-6">
+        <h2 class="text-2xl font-bold text-gray-900 mb-4">Cambios a aplicar</h2>
+        <p class="text-sm text-gray-500 mb-4">
+            Solo se aplicarán los campos donde selecciones un valor. Las opciones que dejes en "No cambiar" se mantendrán como están.
+        </p>
+
+        <form method="POST" class="space-y-6">
+            <?php foreach ($ids as $id): ?>
+                <input type="hidden" name="ids[]" value="<?= (int) $id ?>">
+            <?php endforeach; ?>
+
+            <div>
+                <label class="block text-lg font-semibold mb-1">Estado</label>
+                <select name="estado"
+                        class="w-full border border-gray-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">No cambiar</option>
+                    <option value="abierto"     <?= $valores_actuales['estado']==='abierto'?'selected':'' ?>>Abierto</option>
+                    <option value="en_proceso"  <?= $valores_actuales['estado']==='en_proceso'?'selected':'' ?>>En Proceso</option>
+                    <option value="cerrado"     <?= $valores_actuales['estado']==='cerrado'?'selected':'' ?>>Cerrado</option>
+                </select>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 text-lg">
-                <div>
-                    <p><strong>Cliente:</strong> <?= htmlspecialchars($primer_ticket['cliente_email']) ?></p>
-                    <p><strong>Asunto:</strong> <?= htmlspecialchars($primer_ticket['asunto']) ?></p>
-                </div>
-                <div>
-                    <p><strong>Tipo:</strong> <?= htmlspecialchars($primer_ticket['tipo_servicio'] ?? 'General') ?></p>
-                    <p><strong>Agente:</strong> <?= htmlspecialchars($primer_ticket['agente_nombre'] ?? 'Sin asignar') ?></p>
-                </div>
+            <div>
+                <label class="block text-lg font-semibold mb-1">Prioridad</label>
+                <select name="prioridad"
+                        class="w-full border border-gray-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">No cambiar</option>
+                    <option value="normal"  <?= $valores_actuales['prioridad']==='normal'?'selected':'' ?>>Normal</option>
+                    <option value="alta"    <?= $valores_actuales['prioridad']==='alta'?'selected':'' ?>>Alta</option>
+                    <option value="urgente" <?= $valores_actuales['prioridad']==='urgente'?'selected':'' ?>>Urgente</option>
+                </select>
             </div>
 
-            <div class="mt-8 bg-gray-50 p-6 rounded-2xl border-2 border-gray-300">
-                <p class="text-xl font-bold text-blue-900 mb-3">Mensaje original:</p>
-                <p class="text-base text-gray-700"><?= nl2br(htmlspecialchars($primer_ticket['mensaje'])) ?></p>
+            <div>
+                <label class="block text-lg font-semibold mb-1">Tipo de servicio</label>
+                <select name="tipo_servicio"
+                        class="w-full border border-gray-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">No cambiar</option>
+                    <?php foreach ($tipos_servicio as $ts): ?>
+                        <option value="<?= htmlspecialchars($ts) ?>" <?= $valores_actuales['tipo_servicio']===$ts?'selected':'' ?>>
+                            <?= htmlspecialchars($ts) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
-        </div>
-        <?php else: ?>
-        <div class="bg-white rounded-3xl shadow-2xl p-8 mb-8 border-4 border-blue-200">
-            <h1 class="text-4xl font-bold text-blue-900 text-center">MODIFICACIÓN MASIVA DE <?= count($ids) ?> TICKETS</h1>
-            <p class="text-center text-gray-600 text-lg mt-4">Estás modificando varios tickets a la vez</p>
-        </div>
-        <?php endif; ?>
 
-        <!-- FORMULARIO -->
-        <div class="bg-white rounded-3xl shadow-3xl p-10 border-8 border-blue-900">
-            <form method="POST" class="space-y-8">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Estado</label>
-                        <select name="estado" class="w-full p-4 border-4 border-blue-300 rounded-xl text-base font-bold bg-gradient-to-r from-blue-50 to-blue-100">
-                            <option value="">-- No cambiar --</option>
-                            <option value="abierto" <?= $valores_actuales['estado']=='abierto'?'selected':'' ?>>Abierto</option>
-                            <option value="en_proceso" <?= $valores_actuales['estado']=='en_proceso'?'selected':'' ?>>En Proceso</option>
-                            <option value="cerrado" <?= $valores_actuales['estado']=='cerrado'?'selected':'' ?>>Cerrado</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Prioridad</label>
-                        <select name="prioridad" class="w-full p-4 border-4 border-blue-300 rounded-xl text-base font-bold bg-gradient-to-r from-orange-50 to-orange-100">
-                            <option value="">-- No cambiar --</option>
-                            <option value="baja" <?= $valores_actuales['prioridad']=='baja'?'selected':'' ?>>Baja</option>
-                            <option value="media" <?= $valores_actuales['prioridad']=='media'?'selected':'' ?>>Media</option>
-                            <option value="alta" <?= $valores_actuales['prioridad']=='alta'?'selected':'' ?>>Alta</option>
-                            <option value="urgente" <?= $valores_actuales['prioridad']=='urgente'?'selected':'' ?>>Urgente</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Tipo de Servicio</label>
-                        <select name="tipo_servicio" class="w-full p-4 border-4 border-blue-300 rounded-xl text-base font-bold bg-gradient-to-r from-purple-50 to-purple-100">
-                            <option value="">-- No cambiar --</option>
-                            <?php foreach($tipos as $tipo): ?>
-                            <option value="<?= htmlspecialchars($tipo) ?>" <?= $valores_actuales['tipo_servicio']==$tipo?'selected':'' ?>>
-                                <?= htmlspecialchars($tipo) ?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Asignar Agente</label>
-                        <select name="agente_id" class="w-full p-4 border-4 border-blue-300 rounded-xl text-base font-bold bg-gradient-to-r from-green-50 to-green-100">
-                            <option value="">-- No cambiar --</option>
-                            <?php foreach($agentes as $agente): ?>
-                            <option value="<?= $agente['id'] ?>" <?= $valores_actuales['agente_id']==$agente['id']?'selected':'' ?>>
-                                <?= htmlspecialchars($agente['nombre']) ?>
-                            </option>
-                            <?php endforeach; ?>
-                        </select>
-                    </div>
-                </div>
-
-                <div>
-                    <label class="block text-lg font-bold text-blue-900 mb-2">Mensaje (se enviará a todos los clientes)</label>
-                    <textarea name="respuesta" rows="6" 
-                              class="w-full p-6 border-4 border-blue-400 rounded-2xl text-base focus:border-green-600 transition resize-none shadow-lg"
-                              placeholder="Este mensaje se enviará a todos los clientes seleccionados..."></textarea>
-                </div>
-
-                <div class="text-center space-y-6 md:space-y-0 md:space-x-10">
-                    <button type="submit" 
-                            class="inline-block w-full max-w-xs bg-gradient-to-r from-green-600 to-green-500 text-white px-20 py-8 rounded-full text-xl font-bold hover:from-green-700 hover:to-green-600 shadow-2xl transform hover:scale-105 transition">
-                        ACTUALIZAR TICKETS
-                    </button>
-                    <a href="tickets.php" 
-                       class="inline-block w-full max-w-xs bg-gray-600 text-white px-20 py-8 rounded-full text-xl font-bold hover:bg-gray-700 shadow-2xl">
-                        CANCELAR
-                    </a>
-                </div>
-            </form>
-        </div>
-
-        <!-- LISTA DE TICKETS -->
-        <div class="mt-12 bg-white rounded-3xl shadow-3xl p-8 border-8 border-blue-900">
-            <h3 class="text-2xl font-bold text-blue-900 mb-6">Tickets seleccionados (<?= count($tickets_seleccionados) ?>):</h3>
-            <div class="space-y-4">
-                <?php foreach($tickets_seleccionados as $t): 
-                    $num = $t['numero'] ?? 'TCK-'.str_pad($t['id'],5,'0',STR_PAD_LEFT);
-                ?>
-                <div class="bg-blue-50 p-4 rounded-xl border-2 border-blue-300">
-                    <span class="font-bold">#<?= htmlspecialchars($num) ?></span> - 
-                    <?= htmlspecialchars($t['asunto']) ?> 
-                    (<?= htmlspecialchars($t['cliente_email']) ?>)
-                </div>
-                <?php endforeach; ?>
+            <div>
+                <label class="block text-lg font-semibold mb-1">Asignar a agente</label>
+                <select name="agente_id"
+                        class="w-full border border-gray-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">No cambiar</option>
+                    <?php foreach ($agentes as $ag): ?>
+                        <option value="<?= (int) $ag['id'] ?>" <?= (string)$valores_actuales['agente_id']===(string)$ag['id']?'selected':'' ?>>
+                            <?= htmlspecialchars($ag['nombre']) ?> (<?= htmlspecialchars($ag['rol']) ?>)
+                        </option>
+                    <?php endforeach; ?>
+                </select>
             </div>
-        </div>
 
-        <div class="text-center mt-12">
-            <a href="tickets.php" class="text-blue-300 hover:text-white text-xl underline">
-                Volver a Tickets
-            </a>
+            <div class="flex flex-wrap items-center gap-4 pt-4">
+                <button type="submit" name="accion" value="aplicar_cambios"
+                        class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-3 rounded-xl shadow">
+                    Aplicar cambios a <?= count($ids) ?> ticket(s)
+                </button>
+                <a href="tickets.php"
+                   class="inline-block px-6 py-3 rounded-xl border border-gray-300 text-gray-700 hover:bg-gray-100">
+                    Cancelar y volver
+                </a>
+            </div>
+        </form>
+    </div>
+
+    <!-- Resumen de tickets -->
+    <div class="bg-white rounded-2xl shadow-lg p-6">
+        <h2 class="text-2xl font-bold text-gray-900 mb-4">
+            Tickets seleccionados (<?= count($tickets_seleccionados) ?>)
+        </h2>
+        <div class="space-y-3 max-h-[480px] overflow-y-auto pr-2">
+            <?php foreach ($tickets_seleccionados as $t): 
+                $num = $t['numero'] ?? ('TCK-' . str_pad($t['id'], 5, '0', STR_PAD_LEFT));
+            ?>
+                <div class="border border-blue-100 rounded-xl px-4 py-3 bg-blue-50">
+                    <div class="font-bold text-blue-900">
+                        #<?= htmlspecialchars($num) ?> · <?= htmlspecialchars($t['asunto']) ?>
+                    </div>
+                    <div class="text-sm text-gray-600">
+                        Cliente: <?= htmlspecialchars($t['cliente_email']) ?>
+                    </div>
+                    <div class="text-sm text-gray-500">
+                        Estado: <?= htmlspecialchars(ucfirst(str_replace('_',' ',$t['estado']))) ?> ·
+                        Prioridad: <?= htmlspecialchars(ucfirst($t['prioridad'])) ?> ·
+                        Tipo: <?= htmlspecialchars($t['tipo_servicio'] ?? 'General') ?>
+                    </div>
+                </div>
+            <?php endforeach; ?>
         </div>
     </div>
 </div>
 
-<?php 
+<?php
+require 'footer.php';
 ob_end_flush();
-require 'footer.php'; 
-?>
