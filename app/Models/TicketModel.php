@@ -7,7 +7,7 @@ use PDO;
 class TicketModel
 {
     /**
-     * Obtiene la conexión PDO usada por el proyecto (la que define bootstrap.php).
+     * Devuelve la conexión PDO configurada en el proyecto.
      *
      * @return PDO
      */
@@ -23,8 +23,7 @@ class TicketModel
     }
 
     /**
-     * Devuelve la lista de tickets visibles para el usuario actual
-     * (filtrados por rol y por estado).
+     * Lista de tickets visibles para el usuario, con filtros por rol y estado.
      *
      * @param array       $user   ['id' => ..., 'rol' => ...]
      * @param string|null $estado 'abierto', 'en_proceso', 'cerrado' o null
@@ -65,10 +64,9 @@ class TicketModel
 
     /**
      * Elimina tickets y sus respuestas asociadas.
-     * Devuelve cuántos tickets se eliminaron.
      *
      * @param int[] $ids
-     * @return int
+     * @return int  cantidad de tickets eliminados
      */
     public static function deleteTicketsAndResponses(array $ids): int
     {
@@ -102,5 +100,52 @@ class TicketModel
             $pdo->rollBack();
             throw $e;
         }
+    }
+
+    /**
+     * Devuelve un ticket por ID incluyendo el nombre del agente (si existe).
+     *
+     * @param int $id
+     * @return array|null
+     */
+    public static function findByIdWithAgent(int $id): ?array
+    {
+        $pdo = self::getPdo();
+
+        $sql = "
+            SELECT t.*, u.nombre AS agente_nombre
+            FROM tickets t
+            LEFT JOIN users u ON t.agente_id = u.id
+            WHERE t.id = ?
+        ";
+
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$id]);
+
+        $ticket = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return $ticket ?: null;
+    }
+
+    /**
+     * Devuelve todas las respuestas de un ticket en orden cronológico.
+     *
+     * @param int $ticketId
+     * @return array
+     */
+    public static function getResponsesForTicket(int $ticketId): array
+    {
+        $pdo = self::getPdo();
+
+        $stmt = $pdo->prepare("
+            SELECT *
+            FROM respuestas
+            WHERE ticket_id = ?
+            ORDER BY creado_el
+        ");
+
+        $stmt->execute([$ticketId]);
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
     }
 }

@@ -1,265 +1,290 @@
-<?php 
+<?php
 ob_start();
-require 'config.php';
-require 'header.php';
 
-// === VERIFICAR USUARIO SIN MENSAJE FEO ===
-if(!isset($user) || !is_array($user) || empty($user['email'])) {
-    header("Location: login.php");
+require __DIR__ . '/config.php';
+require __DIR__ . '/app/bootstrap.php';
+
+use App\Models\TicketModel;
+
+require 'header.php'; // abre el layout y carga $user
+
+// --- Verificar sesión de usuario de forma amigable ---
+if (!isset($user) || !is_array($user) || empty($user['email'])) {
+    header('Location: login.php');
     exit();
 }
 
-if(!isset($_GET['ticket_id']) || !is_numeric($_GET['ticket_id'])){
-    die('<div class="p-20 text-center text-red-600 text-5xl font-bold bg-white rounded-3xl shadow-3xl">Ticket no válido</div>');
+// --- Validar ticket_id ---
+if (!isset($_GET['ticket_id']) || !ctype_digit($_GET['ticket_id'])) {
+    echo '<div class="p-12 text-center text-red-600 text-2xl font-bold bg-white rounded-3xl shadow-2xl">
+            Ticket no válido
+          </div>';
+    require 'footer.php';
+    ob_end_flush();
+    exit();
 }
 
-$ticket_id = intval($_GET['ticket_id']);
+$ticketId = (int) $_GET['ticket_id'];
 
-// CARGAR TICKET
-$stmt = $pdo->prepare("SELECT t.*, u.nombre as agente_nombre FROM tickets t LEFT JOIN users u ON t.agente_id = u.id WHERE t.id = ?");
-$stmt->execute([$ticket_id]);
-$ticket = $stmt->fetch();
+// --- Cargar ticket desde el modelo ---
+$ticket = TicketModel::findByIdWithAgent($ticketId);
 
-if(!$ticket){
-    die('<div class="p-20 text-center text-red-600 text-5xl font-bold bg-white rounded-3xl shadow-3xl">Ticket no encontrado</div>');
+if (!$ticket) {
+    echo '<div class="p-12 text-center text-red-600 text-2xl font-bold bg-white rounded-3xl shadow-2xl">
+            Ticket no encontrado
+          </div>';
+    require 'footer.php';
+    ob_end_flush();
+    exit();
 }
 
-$numero = $ticket['numero'] ?? 'TCK-'.str_pad($ticket['id'],5,'0',STR_PAD_LEFT);
+$numero = $ticket['numero'] ?? ('TCK-' . str_pad($ticket['id'], 5, '0', STR_PAD_LEFT));
 
-// CARGAR RESPUESTAS
-$stmt = $pdo->prepare("SELECT * FROM respuestas WHERE ticket_id = ? ORDER BY creado_el");
-$stmt->execute([$ticket_id]);
-$respuestas = $stmt->fetchAll();
+// --- Cargar respuestas existentes ---
+$respuestas = TicketModel::getResponsesForTicket($ticketId);
 
-// === CARGAR CONFIG EMAIL (100% SEGURO) ===
+// --- Config de correo (defaults + DB) ---
 $config_email = [
-    'smtp_host' => '',
-    'smtp_port' => 587,
-    'smtp_usuario' => '',
-    'smtp_clave' => '',
-    'smtp_encriptacion' => 'tls',
-    'smtp_from_email' => 'soporte@sansouci.com.do',
-    'smtp_from_name' => 'Sansouci Desk',
+    'smtp_host'            => '',
+    'smtp_port'            => 587,
+    'smtp_usuario'         => '',
+    'smtp_clave'           => '',
+    'smtp_encriptacion'    => 'tls',
+    'smtp_from_email'      => 'soporte@sansouci.com.do',
+    'smtp_from_name'       => 'Sansouci Desk',
     'correos_notificacion' => '',
-    'activado' => 0
+    'activado'             => 0,
 ];
 
 try {
     $stmt = $pdo->query("SELECT * FROM config_email WHERE id = 1");
-    $row = $stmt->fetch(PDO::FETCH_ASSOC);
-    if(is_array($row)){
+    $row  = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (is_array($row)) {
         $config_email = array_merge($config_email, $row);
     }
-} catch(Exception $e) {}
+} catch (\Throwable $e) {
+    // No romper la página si la tabla/config no existe aún.
+}
 
-// === PROCESAR RESPUESTA ===
-$mensaje = '';
-if($_POST && isset($_POST['respuesta'])){
-    $respuesta = trim($_POST['respuesta']);
-    if(empty($respuesta)){
-        $mensaje = "La respuesta no puede estar vacía";
+// --- Procesar envío de respuesta ---
+$mensajeFlash = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['respuesta'])) {
+    $respuesta = trim($_POST['respuesta'] ?? '');
+
+    if ($respuesta === '') {
+        $mensajeFlash = 'La respuesta no puede estar vacía';
     } else {
         try {
-            $stmt = $pdo->prepare("INSERT INTO respuestas (ticket_id, mensaje, autor, autor_email, creado_el) 
-                                   VALUES (?, ?, 'agente', ?, NOW())");
-            $stmt->execute([$ticket_id, $respuesta, $user['email']]);
+            // Guardar respuesta en la tabla
+            $stmt = $pdo->prepare("
+                INSERT INTO respuestas (ticket_id, mensaje, autor, autor_email, creado_el)
+                VALUES (?, ?, 'agente', ?, NOW())
+            ");
+            $stmt->execute([$ticketId, $respuesta, $user['email']]);
 
-            if(!empty($config_email['smtp_usuario']) && !empty($config_email['smtp_clave'])){
-                require 'phpmailer/src/Exception.php';
-                require 'phpmailer/src/PHPMailer.php';
-                require 'phpmailer/src/SMTP.php';
+            // Actualizar fecha de actualización del ticket
+            $stmt = $pdo->prepare("UPDATE tickets SET actualizado_el = NOW() WHERE id = ?");
+            $stmt->execute([$ticketId]);
+
+            // Enviar correo solo si hay configuración válida y está activado
+            if (!empty($config_email['smtp_usuario']) &&
+                !empty($config_email['smtp_clave']) &&
+                !empty($config_email['activado'])) {
+
+                require __DIR__ . '/phpmailer/src/Exception.php';
+                require __DIR__ . '/phpmailer/src/PHPMailer.php';
+                require __DIR__ . '/phpmailer/src/SMTP.php';
 
                 $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
+
                 try {
                     $mail->isSMTP();
                     $mail->Host       = $config_email['smtp_host'];
                     $mail->SMTPAuth   = true;
                     $mail->Username   = $config_email['smtp_usuario'];
                     $mail->Password   = $config_email['smtp_clave'];
-                    $mail->SMTPSecure = $config_email['smtp_encriptacion'] ?: false;
-                    $mail->Port       = (int)$config_email['smtp_port'];
-                    $mail->CharSet    = 'UTF-8';
 
-                    $mail->setFrom($config_email['smtp_usuario'], $config_email['smtp_from_name']);
-                    $mail->addReplyTo($config_email['smtp_from_email'] ?: $config_email['smtp_usuario'], 'Sansouci Desk');
+                    if (!empty($config_email['smtp_encriptacion']) && $config_email['smtp_encriptacion'] !== 'none') {
+                        $mail->SMTPSecure = $config_email['smtp_encriptacion'];
+                    }
+
+                    $mail->Port    = (int) $config_email['smtp_port'];
+                    $mail->CharSet = 'UTF-8';
+
+                    $fromEmail = $config_email['smtp_from_email'] ?: $config_email['smtp_usuario'];
+                    $fromName  = $config_email['smtp_from_name'] ?: 'Sansouci Desk';
+
+                    $mail->setFrom($fromEmail, $fromName);
+                    $mail->addReplyTo($fromEmail, 'Sansouci Desk');
                     $mail->addAddress($ticket['cliente_email']);
 
+                    // BCC adicionales
                     $destinos = array_filter(array_map('trim', explode(',', $config_email['correos_notificacion'] ?? '')));
                     foreach ($destinos as $to) {
-                        if($to && $to != $ticket['cliente_email']){
+                        if ($to && $to !== $ticket['cliente_email']) {
                             $mail->addBCC($to);
                         }
                     }
 
                     $mail->isHTML(true);
-                    $mail->Subject = "Re: Ticket #$numero - {$ticket['asunto']}";
-                    $mail->Body    = "
-                    <div style='font-family: Arial, sans-serif; max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 15px 40px rgba(0,0,0,0.2); border: 5px solid #003087;'>
-                        <img src='https://www.sansouci.com.do/wp-content/uploads/2020/06/logo-sansouci.png' alt='Sansouci' style='height: 80px; display: block; margin: 0 auto 30px;'>
-                        <h1 style='color: #003087; text-align: center; font-size: 32px;'>RESPUESTA A TU TICKET</h1>
-                        <div style='background: #f0f8ff; padding: 30px; border-radius: 15px; text-align: center; border: 3px dashed #003087;'>
-                            <p style='font-size: 28px; margin: 15px 0;'><strong>Ticket:</strong> <span style='color: #003087; font-size: 40px; font-weight: bold;'>$numero</span></p>
+                    $mail->Subject = "Re: Ticket #{$numero} - {$ticket['asunto']}";
+
+                    $bodyHtml = "
+                        <div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#111'>
+                            <h2 style='color:#003087'>Respuesta a tu ticket {$numero}</h2>
+                            <p><strong>Asunto:</strong> " . htmlspecialchars($ticket['asunto']) . "</p>
+                            <p><strong>Mensaje original:</strong><br>" . nl2br(htmlspecialchars($ticket['mensaje'])) . "</p>
+                            <hr style='margin:16px 0'>
+                            <p><strong>Respuesta del agente:</strong><br>" . nl2br(htmlspecialchars($respuesta)) . "</p>
+                            <p style='margin-top:24px'>Puedes responder a este correo si necesitas más ayuda.</p>
                         </div>
-                        <div style='background: #e6f7ff; padding: 30px; border-radius: 15px; margin: 30px 0; border-left: 8px solid #003087;'>
-                            <p style='font-size: 20px; color: #003087; font-weight: bold; margin-bottom: 20px;'>Respuesta del agente:</p>
-                            <p style='font-size: 18px; color: #333; line-height: 1.8;'>" . nl2br(htmlspecialchars($respuesta)) . "</p>
-                        </div>
-                        <div style='text-align: center; margin: 40px 0;'>
-                            <a href='http://localhost/sansouci-desk/portal_cliente.php?email=" . urlencode($ticket['cliente_email']) . "' 
-                               style='background: #003087; color: white; padding: 20px 50px; text-decoration: none; border-radius: 50px; font-size: 24px; font-weight: bold; display: inline-block;'>
-                               VER MI TICKET
-                            </a>
-                        </div>
-                    </div>";
+                    ";
+
+                    $bodyText = "Respuesta a tu ticket {$numero}\n\n"
+                              . "Asunto: {$ticket['asunto']}\n\n"
+                              . "Mensaje original:\n{$ticket['mensaje']}\n\n"
+                              . "Respuesta del agente:\n{$respuesta}\n";
+
+                    $mail->Body    = $bodyHtml;
+                    $mail->AltBody = $bodyText;
 
                     $mail->send();
-                    $mensaje = "Respuesta enviada al cliente y notificaciones";
-                } catch (Exception $e) {
-                    $mensaje = "Respuesta guardada. Error de correo: " . htmlspecialchars($mail->ErrorInfo);
+                } catch (\Throwable $e) {
+                    // Si falla el correo, no rompemos la app.
                 }
-            } else {
-                $mensaje = "Respuesta guardada. Configura el correo en Mantenimiento → Config. Email";
             }
 
-            header("Location: responder.php?ticket_id=$ticket_id&enviado=1");
-            exit();
-
-        } catch(Exception $e){
-            $mensaje = "Error del sistema: " . htmlspecialchars($e->getMessage());
+            // Reload de respuestas para incluir la nueva
+            $respuestas   = TicketModel::getResponsesForTicket($ticketId);
+            $mensajeFlash = 'Respuesta enviada correctamente';
+        } catch (\Throwable $e) {
+            $mensajeFlash = 'Ocurrió un problema al guardar la respuesta.';
         }
     }
 }
-
-$mensaje_exito = (isset($_GET['enviado']) && $_GET['enviado'] == 1);
 ?>
 
-<div class="min-h-screen bg-gradient-to-br from-blue-900 to-blue-700 py-12 px-4">
-    <div class="max-w-4xl mx-auto">
-        <h1 class="text-5xl font-bold text-white text-center mb-12 drop-shadow-2xl">
-            Ticket #<?= htmlspecialchars($numero) ?> - Responder
-        </h1>
+<h1 class="text-4xl font-bold text-blue-900 mb-6">
+    Ticket #<?= htmlspecialchars($numero) ?>
+</h1>
+<p class="text-lg text-gray-600 mb-10">
+    Cliente: <strong><?= htmlspecialchars($ticket['cliente_email']) ?></strong>
+    &nbsp;·&nbsp;
+    Estado: <strong><?= htmlspecialchars(ucfirst(str_replace('_',' ',$ticket['estado']))) ?></strong>
+    &nbsp;·&nbsp;
+    Prioridad: <strong><?= htmlspecialchars(ucfirst($ticket['prioridad'])) ?></strong>
+</p>
 
-        <?php if($mensaje_exito): ?>
-        <div class="bg-green-600 text-white px-10 py-6 rounded-3xl mb-10 text-2xl font-bold text-center shadow-2xl">
-            RESPUESTA ENVIADA CORRECTAMENTE
-        </div>
+<?php if ($mensajeFlash): ?>
+    <div class="mb-8 px-6 py-4 rounded-xl text-lg font-semibold
+                <?= str_starts_with($mensajeFlash, 'Respuesta enviada') ? 'bg-green-100 text-green-800 border border-green-400' : 'bg-yellow-100 text-yellow-800 border border-yellow-400' ?>">
+        <?= htmlspecialchars($mensajeFlash) ?>
+    </div>
+<?php endif; ?>
+
+<!-- Detalle del ticket -->
+<div class="bg-white rounded-2xl shadow-lg mb-10 p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-4">Detalle del ticket</h2>
+    <p class="mb-2"><strong>Asunto:</strong> <?= htmlspecialchars($ticket['asunto']) ?></p>
+    <p class="mb-4"><strong>Mensaje del cliente:</strong><br><?= nl2br(htmlspecialchars($ticket['mensaje'])) ?></p>
+    <p class="text-sm text-gray-500">
+        Creado el <?= date('d/m/Y H:i', strtotime($ticket['creado_el'])) ?>
+        <?php if (!empty($ticket['agente_nombre'])): ?>
+            &nbsp;·&nbsp; Asignado a <?= htmlspecialchars($ticket['agente_nombre']) ?>
         <?php endif; ?>
+    </p>
+</div>
 
-        <?php if($mensaje && !$mensaje_exito): ?>
-        <div class="bg-yellow-100 border-8 border-yellow-600 text-yellow-800 px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            <?= htmlspecialchars($mensaje) ?>
-        </div>
-        <?php endif; ?>
-
-        <!-- INFO DEL TICKET -->
-        <div class="bg-white rounded-3xl shadow-3xl p-10 mb-12 border-8 border-blue-900">
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-8 text-lg">
-                <div>
-                    <p><strong>Cliente:</strong> <?= htmlspecialchars($ticket['cliente_email']) ?></p>
-                    <p><strong>Asunto:</strong> <?= htmlspecialchars($ticket['asunto']) ?></p>
-                    <p><strong>Tipo:</strong> <?= htmlspecialchars($ticket['tipo_servicio'] ?? 'General') ?></p>
-                    <p><strong>Estado:</strong> 
-                        <span class="px-6 py-2 rounded-full text-sm font-bold <?= $ticket['estado']=='abierto'?'bg-green-200 text-green-800':($ticket['estado']=='cerrado'?'bg-gray-400 text-white':'bg-yellow-200 text-yellow-800') ?>">
-                            <?= ucfirst(str_replace('_',' ',$ticket['estado'])) ?>
-                        </span>
-                    </p>
-                </div>
-                <div>
-                    <p><strong>Agente:</strong> <?= htmlspecialchars($ticket['agente_nombre'] ?? 'Sin asignar') ?></p>
-                    <p><strong>Fecha:</strong> <?= date('d/m/Y H:i', strtotime($ticket['creado_el'])) ?></p>
-                    <p><strong>Prioridad:</strong> 
-                        <span class="px-6 py-2 rounded-full text-sm font-bold <?= $ticket['prioridad']=='urgente'?'bg-red-200 text-red-800':($ticket['prioridad']=='alta'?'bg-orange-200 text-orange-800':'bg-blue-200 text-blue-800') ?>">
-                            <?= ucfirst($ticket['prioridad']) ?>
-                        </span>
-                    </p>
-                </div>
-            </div>
-            <div class="mt-8 bg-blue-50 p-8 rounded-3xl border-4 border-blue-300">
-                <p class="text-xl font-bold text-blue-900 mb-4">Mensaje original del cliente:</p>
-                <p class="text-base text-gray-700 leading-relaxed"><?= nl2br(htmlspecialchars($ticket['mensaje'])) ?></p>
-            </div>
+<!-- Formulario de respuesta -->
+<div class="bg-white rounded-2xl shadow-lg mb-10 p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-4">Responder al cliente</h2>
+    <form method="POST" class="space-y-4">
+        <div>
+            <label class="block mb-2 font-semibold text-gray-700">Respuesta</label>
+            <textarea name="respuesta" rows="5"
+                      class="w-full border border-gray-300 rounded-xl p-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Escribe aquí tu respuesta para el cliente..."></textarea>
         </div>
 
-        <!-- PLANTILLAS RÁPIDAS -->
-        <div class="bg-gradient-to-r from-teal-50 to-green-50 rounded-3xl p-10 mb-12 border-8 border-teal-400 shadow-2xl">
-            <h4 class="text-3xl font-bold text-teal-900 mb-8 text-center">
-                RESPUESTAS RÁPIDAS
-            </h4>
-            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-6">
+        <!-- Respuestas rápidas -->
+        <div class="mt-6">
+            <h3 class="font-semibold text-gray-800 mb-2">Respuestas rápidas</h3>
+            <div class="flex flex-wrap gap-2">
                 <?php
                 try {
-                    $stmt = $pdo->query("SELECT * FROM plantillas_respuesta ORDER BY titulo");
-                    while($p = $stmt->fetch(PDO::FETCH_ASSOC)):
-                ?>
-                <button type="button" 
-                        onclick="aplicarPlantilla(`<?= htmlspecialchars(addslashes($p['mensaje']), ENT_QUOTES) ?>`)" 
-                        class="bg-white border-4 border-teal-500 rounded-2xl p-6 text-base font-bold text-teal-800 hover:bg-teal-100 hover:border-teal-700 hover:scale-105 transition-all duration-300 shadow-xl">
-                    <?= htmlspecialchars($p['titulo']) ?>
-                </button>
-                <?php 
+                    $stmtPlant = $pdo->query("SELECT * FROM plantillas_respuesta ORDER BY titulo");
+                    while ($p = $stmtPlant->fetch(PDO::FETCH_ASSOC)): ?>
+                        <button type="button"
+                                onclick="aplicarPlantilla(`<?= htmlspecialchars(addslashes($p['mensaje']), ENT_QUOTES) ?>`)"
+                                class="px-3 py-2 text-sm rounded-full border border-blue-300 text-blue-800 bg-blue-50 hover:bg-blue-100">
+                            <?= htmlspecialchars($p['titulo']) ?>
+                        </button>
+                <?php
                     endwhile;
-                } catch(Exception $e) {
-                    echo "<p class='text-red-600 text-center col-span-full'>No hay plantillas disponibles</p>";
+                } catch (\Throwable $e) {
+                    // si no hay tabla o falla, simplemente no mostramos nada
                 }
                 ?>
             </div>
         </div>
 
-        <!-- FORMULARIO DE RESPUESTA -->
-        <form method="POST" class="bg-white rounded-3xl shadow-3xl p-12 border-8 border-green-600">
-            <label class="block text-2xl font-bold text-blue-900 mb-6 text-center">
-                ESCRIBE TU RESPUESTA
-            </label>
-            <textarea name="respuesta" rows="10 Rivrequired 
-                      class="w-full p-6 border-4 border-blue-400 rounded-2xl text-base focus:border-green-600 transition resize-none shadow-lg bg-gradient-to-b from-white to-green-50"
-                      placeholder="Tu respuesta será enviada al cliente y a los correos de notificación..."></textarea>
-            
-            <div class="text-center mt-10 space-y-6 md:space-y-0 md:space-x-10">
-                <button type="submit" 
-                        class="inline-block w-full max-w-xs bg-gradient-to-r from-green-600 to-green-500 text-white px-20 py-8 rounded-full text-xl font-bold hover:from-green-700 hover:to-green-600 shadow-2xl transform hover:scale-105 transition">
-                    ENVIAR RESPUESTA
-                </button>
-                <a href="tickets.php" 
-                   class="inline-block w-full max-w-xs bg-gray-600 text-white px-20 py-8 rounded-full text-xl font-bold hover:bg-gray-700 shadow-2xl">
-                    VOLVER
-                </a>
-            </div>
-        </form>
-
-        <!-- SCRIPT PARA PLANTILLAS -->
-        <script>
-        function aplicarPlantilla(mensaje) {
-            const textarea = document.querySelector('textarea[name="respuesta"]');
-            textarea.value = mensaje.replace(/\\n/g, '\n');
-            textarea.focus();
-            textarea.scrollTop = 0;
-        }
-        </script>
-
-        <!-- HISTORIAL -->
-        <?php if(!empty($respuestas)): ?>
-        <div class="mt-16">
-            <h2 class="text-4xl font-bold text-white text-center mb-12 drop-shadow-2xl">Historial de Conversación</h2>
-            <div class="space-y-10">
-                <?php foreach($respuestas as $r): ?>
-                <div class="bg-white rounded-3xl shadow-2xl p-10 border-l-8 <?= $r['autor']=='cliente'?'border-green-600':'border-blue-600' ?>">
-                    <div class="flex justify-between items-start mb-6">
-                        <span class="text-xl font-bold <?= $r['autor']=='cliente'?'text-green-800':'text-blue-800' ?>">
-                            <?= $r['autor']=='cliente'?'Cliente':'Agente' ?> 
-                            <?= $r['autor']=='agente' ? '('.htmlspecialchars($r['autor_email']).')' : '' ?>
-                        </span>
-                        <span class="text-sm text-gray-600"><?= date('d/m/Y H:i', strtotime($r['creado_el'])) ?></span>
-                    </div>
-                    <p class="text-base text-gray-700 leading-relaxed"><?= nl2br(htmlspecialchars($r['mensaje'])) ?></p>
-                </div>
-                <?php endforeach; ?>
-            </div>
+        <div class="flex flex-wrap items-center gap-4 mt-6">
+            <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-6 py-3 rounded-xl shadow">
+                Enviar respuesta
+            </button>
+            <a href="tickets.php"
+               class="inline-block px-6 py-3 rounded-xl border border-gray-300 text-gray-700 hover:bg-gray-100">
+               Volver a tickets
+            </a>
         </div>
-        <?php endif; ?>
-    </div>
+    </form>
 </div>
 
-<?php 
+<!-- Historial de respuestas -->
+<div class="bg-white rounded-2xl shadow-lg p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-4">Historial de respuestas</h2>
+
+    <?php if (empty($respuestas)): ?>
+        <p class="text-gray-500 text-base">Aún no hay respuestas registradas para este ticket.</p>
+    <?php else: ?>
+        <div class="space-y-4">
+            <?php foreach ($respuestas as $r): ?>
+                <div class="border border-gray-200 rounded-xl p-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <div>
+                            <span class="font-bold">
+                                <?= $r['autor'] === 'agente' ? 'Agente' : 'Cliente' ?>
+                            </span>
+                            <?php if ($r['autor'] === 'agente' && !empty($r['autor_email'])): ?>
+                                <span class="text-sm text-gray-500">
+                                    (<?= htmlspecialchars($r['autor_email']) ?>)
+                                </span>
+                            <?php endif; ?>
+                        </div>
+                        <span class="text-sm text-gray-500">
+                            <?= date('d/m/Y H:i', strtotime($r['creado_el'])) ?>
+                        </span>
+                    </div>
+                    <p class="text-gray-800 text-base leading-relaxed">
+                        <?= nl2br(htmlspecialchars($r['mensaje'])) ?>
+                    </p>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+</div>
+
+<script>
+function aplicarPlantilla(mensaje) {
+    const textarea = document.querySelector('textarea[name="respuesta"]');
+    if (!textarea) return;
+    textarea.value = mensaje.replace(/\\n/g, '\n');
+    textarea.focus();
+}
+</script>
+
+<?php
+require 'footer.php';
 ob_end_flush();
-require 'footer.php'; 
-?>
