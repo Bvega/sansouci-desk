@@ -1,227 +1,264 @@
-<?php 
+<?php
 ob_start();
-require 'config.php';
+
+require __DIR__ . '/config.php';
+require __DIR__ . '/config_email.php';
 require 'header.php';
 
-if(!in_array($user['rol'],['administrador','superadmin'])) { 
-    die('<div class="p-10 text-center text-red-600 text-3xl font-bold">Acceso denegado. Solo administradores.</div>'); 
+// Solo admin / superadmin
+if (!$user || !in_array($user['rol'], ['administrador', 'superadmin'])) {
+    header('Location: dashboard.php');
+    exit();
 }
 
-use PHPMailer\PHPMailer\PHPMailer;
-require 'phpmailer/src/PHPMailer.php';
-require 'phpmailer/src/SMTP.php';
-require 'phpmailer/src/Exception.php';
+// Cargar config actual
+$currentConfig = loadEmailConfig($pdo);
 
-// === GUARDAR CONFIGURACIÓN (SIEMPRE ACTUALIZA ID=1) ===
-if (isset($_POST['guardar'])) {
-    $datos = [
-        trim($_POST['smtp_host'] ?? ''),
-        (int)($_POST['smtp_port'] ?? 587),
-        trim($_POST['smtp_usuario'] ?? ''),
-        $_POST['smtp_clave'] ?? '',
-        $_POST['smtp_encriptacion'] ?? '',
-        trim($_POST['correo_from'] ?? ''),
-        trim($_POST['nombre_from'] ?? 'Sansouci Desk'),
-        trim($_POST['correos_notificacion'] ?? ''),
-        isset($_POST['activado']) ? 1 : 0
-    ];
+$errors = [];
+$successMessage = '';
+$testMessage = '';
 
-    try {
-        $sql = "UPDATE config_email SET 
-                smtp_host=?, smtp_port=?, smtp_usuario=?, smtp_clave=?, 
-                smtp_encriptacion=?, correo_from=?, nombre_from=?, 
-                correos_notificacion=?, activado=? 
-                WHERE id = 1";
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $action = $_POST['action'] ?? '';
 
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute($datos);
-        
-        if($stmt->rowCount() == 0) {
-            $sql_insert = "INSERT INTO config_email 
-                (id, smtp_host, smtp_port, smtp_usuario, smtp_clave, smtp_encriptacion, correo_from, nombre_from, correos_notificacion, activado) 
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-            $pdo->prepare($sql_insert)->execute($datos);
+    if ($action === 'save') {
+
+        $smtp_host   = trim($_POST['smtp_host']   ?? '');
+        $smtp_port   = (int)($_POST['smtp_port']  ?? 587);
+        $smtp_user   = trim($_POST['smtp_user']   ?? '');
+        $smtp_pass   = $_POST['smtp_pass']        ?? '';
+        $smtp_secure = $_POST['smtp_secure']      ?? 'tls';
+        $from_email  = trim($_POST['from_email']  ?? '');
+        $from_name   = trim($_POST['from_name']   ?? 'Sansouci Desk');
+
+        if ($smtp_host === '') {
+            $errors[] = 'El host SMTP es obligatorio.';
+        }
+        if ($smtp_user === '') {
+            $errors[] = 'El usuario SMTP es obligatorio.';
+        }
+        if ($from_email === '') {
+            $errors[] = 'El correo remitente (From) es obligatorio.';
+        } elseif (!filter_var($from_email, FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'El correo remitente no es válido.';
         }
 
-        header("Location: config_correo.php?guardado=1");
-        exit();
-    } catch(Exception $e){
-        $error_msg = "ERROR: " . htmlspecialchars($e->getMessage());
+        // Tomar la config actual como base
+        $newConfig = $currentConfig;
+
+        $newConfig['smtp_host']   = $smtp_host;
+        $newConfig['smtp_port']   = $smtp_port;
+        $newConfig['smtp_user']   = $smtp_user;
+        $newConfig['smtp_secure'] = $smtp_secure;
+        $newConfig['from_email']  = $from_email;
+        $newConfig['from_name']   = $from_name;
+
+        // Solo si escriben algo en password, lo actualizamos
+        if ($smtp_pass !== '') {
+            $newConfig['smtp_pass'] = $smtp_pass;
+        }
+
+        if (empty($errors)) {
+            saveEmailConfig($pdo, $newConfig);
+            $currentConfig   = loadEmailConfig($pdo);
+            $successMessage  = 'Configuración de correo guardada correctamente.';
+        }
+
+    } elseif ($action === 'test') {
+
+        $test_email = trim($_POST['test_email'] ?? '');
+
+        if ($test_email === '') {
+            $errors[] = 'Debes indicar un correo para la prueba.';
+        } elseif (!filter_var($test_email, FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'El correo de prueba no es válido.';
+        } else {
+            $ok = sendSupportMail(
+                $test_email,
+                'Prueba de configuración Sansouci Desk',
+                '<p>Este es un correo de prueba enviado desde Sansouci Desk.</p>'
+            );
+
+            if ($ok) {
+                $testMessage = 'Correo de prueba enviado correctamente a ' . htmlspecialchars($test_email) . '.';
+            } else {
+                $errors[] = 'No se pudo enviar el correo de prueba. Revisa los datos SMTP.';
+            }
+        }
     }
-}
-
-// === PRUEBA DE ENVÍO ===
-if (isset($_POST['probar'])) {
-    $test_email = trim($_POST['test_email'] ?? '');
-    if(empty($test_email) || !filter_var($test_email, FILTER_VALIDATE_EMAIL)){
-        header("Location: config_correo.php?prueba=error_correo");
-        exit();
-    }
-
-    $config = $pdo->query("SELECT * FROM config_email WHERE id = 1")->fetch();
-    
-    if (!$config || !$config['activado']) {
-        header("Location: config_correo.php?prueba=desactivado");
-        exit();
-    }
-
-    $mail = new PHPMailer(true);
-    try {
-        $mail->isSMTP();
-        $mail->Host       = $config['smtp_host'];
-        $mail->SMTPAuth   = true;
-        $mail->Username   = $config['smtp_usuario'];
-        $mail->Password   = $config['smtp_clave'];
-        $mail->SMTPSecure = $config['smtp_encriptacion'] ?: false;
-        $mail->Port       = $config['smtp_port'];
-        $mail->CharSet    = 'UTF-8';
-
-        $mail->setFrom($config['correo_from'], $config['nombre_from']);
-        $mail->addAddress($test_email);
-        $mail->isHTML(true);
-        $mail->Subject = "PRUEBA - Sansouci Desk";
-        $mail->Body    = "<h2>PRUEBA EXITOSA</h2><p>Funciona perfecto!</p>";
-
-        $mail->send();
-        header("Location: config_correo.php?prueba=enviado");
-        exit();
-    } catch (Exception $e) {
-        header("Location: config_correo.php?prueba=error&msg=" . urlencode($mail->ErrorInfo));
-        exit();
-    }
-}
-
-// === CARGAR CONFIGURACIÓN (SIEMPRE ID=1) ===
-$config = $pdo->query("SELECT * FROM config_email WHERE id = 1")->fetch();
-if (!$config) {
-    $pdo->exec("INSERT INTO config_email (id, activado) VALUES (1, 1)");
-    $config = $pdo->query("SELECT * FROM config_email WHERE id = 1")->fetch();
 }
 ?>
 
-<div class="min-h-screen bg-gradient-to-br from-blue-900 to-blue-700 py-12 px-4">
-    <div class="max-w-4xl mx-auto">
-        <div class="text-center mb-12">
-            <h1 class="text-5xl font-bold text-white mb-4">CONFIGURACIÓN DE CORREO</h1>
-            <p class="text-xl text-blue-200">Sansouci Desk - Envío de notificaciones</p>
-        </div>
+<h1 class="text-4xl font-bold text-blue-900 mb-6">Configuración de Correo</h1>
+<p class="text-gray-600 mb-8 max-w-3xl">
+    Define aquí los parámetros de tu servidor SMTP. Esta configuración se utilizará para enviar
+    notificaciones de tickets y respuestas a los clientes.
+</p>
 
-        <!-- MENSAJES -->
-        <?php if(isset($_GET['guardado'])): ?>
-        <div class="bg-green-600 text-white px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            CONFIGURACIÓN GUARDADA CORRECTAMENTE
-        </div>
-        <?php endif; ?>
+<?php if (!empty($errors)): ?>
+    <div class="mb-6 px-6 py-4 border border-red-400 bg-red-100 text-red-800 rounded-xl text-lg">
+        <ul class="list-disc list-inside">
+            <?php foreach ($errors as $err): ?>
+                <li><?= htmlspecialchars($err) ?></li>
+            <?php endforeach; ?>
+        </ul>
+    </div>
+<?php endif; ?>
 
-        <?php if(isset($_GET['prueba'])): ?>
-        <?php if($_GET['prueba'] == 'enviado'): ?>
-        <div class="bg-green-600 text-white px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            PRUEBA ENVIADA CORRECTAMENTE
-        </div>
-        <?php elseif($_GET['prueba'] == 'error_correo'): ?>
-        <div class="bg-red-600 text-white px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            FALTA CORREO DE PRUEBA
-        </div>
-        <?php elseif($_GET['prueba'] == 'desactivado'): ?>
-        <div class="bg-orange-600 text-white px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            ENVÍO DESACTIVADO
-        </div>
-        <?php elseif($_GET['prueba'] == 'error'): ?>
-        <div class="bg-red-600 text-white px-10 py-6 rounded-3xl mb-10 text-xl font-bold text-center shadow-2xl">
-            ERROR: <?= htmlspecialchars($_GET['msg'] ?? 'Desconocido') ?>
-        </div>
-        <?php endif; ?>
-        <?php endif; ?>
+<?php if ($successMessage): ?>
+    <div class="mb-4 px-6 py-4 border border-green-400 bg-green-100 text-green-800 rounded-xl text-lg">
+        <?= htmlspecialchars($successMessage) ?>
+    </div>
+<?php endif; ?>
 
-        <!-- FORMULARIO -->
-        <div class="bg-white rounded-3xl shadow-3xl p-10 border-8 border-blue-900">
-            <form method="POST" class="space-y-8">
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<?php if ($testMessage): ?>
+    <div class="mb-4 px-6 py-4 border border-blue-400 bg-blue-100 text-blue-800 rounded-xl text-lg">
+        <?= htmlspecialchars($testMessage) ?>
+    </div>
+<?php endif; ?>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+    <!-- Configuración SMTP -->
+    <div class="lg:col-span-2">
+        <div class="bg-white rounded-2xl shadow-2xl p-8">
+            <h2 class="text-2xl font-bold text-blue-900 mb-4">Servidor SMTP</h2>
+
+            <form method="POST" class="space-y-5">
+                <input type="hidden" name="action" value="save">
+
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">
+                        Host SMTP
+                    </label>
+                    <input
+                        type="text"
+                        name="smtp_host"
+                        value="<?= htmlspecialchars($currentConfig['smtp_host'] ?? '') ?>"
+                        class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="smtp.tudominio.com">
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">SMTP Host</label>
-                        <input type="text" name="smtp_host" value="<?= htmlspecialchars($config['smtp_host'] ?? '') ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">
+                            Puerto
+                        </label>
+                        <input
+                            type="number"
+                            name="smtp_port"
+                            value="<?= htmlspecialchars((string)($currentConfig['smtp_port'] ?? 587)) ?>"
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
+
                     <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Puerto</label>
-                        <input type="number" name="smtp_port" value="<?= $config['smtp_port'] ?? 587 ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Encriptación</label>
-                        <select name="smtp_encriptacion" class="w-full p-4 border-4 border-blue-300 rounded-xl text-base font-bold bg-gradient-to-r from-blue-50 to-blue-100">
-                            <option value="tls" <?= ($config['smtp_encriptacion'] ?? '')=='tls'?'selected':'' ?>>TLS</option>
-                            <option value="ssl" <?= ($config['smtp_encriptacion'] ?? '')=='ssl'?'selected':'' ?>>SSL</option>
-                            <option value="">Ninguna</option>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">
+                            Seguridad
+                        </label>
+                        <select
+                            name="smtp_secure"
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <?php $sec = $currentConfig['smtp_secure'] ?? 'tls'; ?>
+                            <option value="tls"  <?= $sec === 'tls'  ? 'selected' : '' ?>>TLS</option>
+                            <option value="ssl"  <?= $sec === 'ssl'  ? 'selected' : '' ?>>SSL</option>
+                            <option value="none" <?= $sec === 'none' ? 'selected' : '' ?>>Sin cifrado</option>
                         </select>
                     </div>
+
                     <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Usuario SMTP</label>
-                        <input type="email" name="smtp_usuario" value="<?= htmlspecialchars($config['smtp_usuario'] ?? '') ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Contraseña SMTP</label>
-                        <input type="password" name="smtp_clave" value="<?= htmlspecialchars($config['smtp_clave'] ?? '') ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Correo de envío</label>
-                        <input type="email" name="correo_from" value="<?= htmlspecialchars($config['correo_from'] ?? '') ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Nombre de envío</label>
-                        <input type="text" name="nombre_from" value="<?= htmlspecialchars($config['nombre_from'] ?? 'Sansouci Desk') ?>" required 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
-                    </div>
-                    <div>
-                        <label class="block text-lg font-bold text-blue-900 mb-2">Correo para Prueba</label>
-                        <input type="email" name="test_email" value="<?= htmlspecialchars($config['smtp_usuario'] ?? '') ?>" placeholder="prueba@tuemail.com" 
-                               class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition shadow-md">
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">
+                            Usuario SMTP
+                        </label>
+                        <input
+                            type="text"
+                            name="smtp_user"
+                            value="<?= htmlspecialchars($currentConfig['smtp_user'] ?? '') ?>"
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="usuario@tudominio.com">
                     </div>
                 </div>
 
-                <div class="md:col-span-2">
-                    <label class="block text-lg font-bold text-blue-900 mb-2">Correos que reciben notificaciones (separados por coma)</label>
-                    <textarea name="correos_notificacion" rows="3" required 
-                              class="w-full p-4 border-4 border-blue-300 rounded-xl text-base focus:border-blue-900 transition resize-none shadow-md">
-<?= htmlspecialchars($config['correos_notificacion'] ?? '') ?>
-                    </textarea>
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">
+                        Contraseña SMTP
+                    </label>
+                    <input
+                        type="password"
+                        name="smtp_pass"
+                        value=""
+                        class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="••••••••">
+                    <p class="mt-1 text-xs text-slate-500">
+                        Deja este campo vacío si no deseas cambiar la contraseña actual.
+                    </p>
                 </div>
 
-                <!-- SWITCH ACTIVAR ENVÍO -->
-                <div class="text-center py-8">
-                    <div class="inline-flex items-center space-x-6 bg-gradient-to-r from-yellow-400 to-orange-400 px-10 py-6 rounded-3xl shadow-2xl">
-                        <input type="checkbox" name="activado" id="activado" <?= $config['activado'] ? 'checked' : '' ?> 
-                               class="w-16 h-16 rounded-full cursor-pointer">
-                        <label for="activado" class="text-3xl font-bold text-blue-900 cursor-pointer">ACTIVAR ENVÍO DE CORREOS</label>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">
+                            Correo remitente (From)
+                        </label>
+                        <input
+                            type="email"
+                            name="from_email"
+                            value="<?= htmlspecialchars($currentConfig['from_email'] ?? '') ?>"
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="no-reply@tudominio.com">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">
+                            Nombre remitente
+                        </label>
+                        <input
+                            type="text"
+                            name="from_name"
+                            value="<?= htmlspecialchars($currentConfig['from_name'] ?? 'Sansouci Desk') ?>"
+                            class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                     </div>
                 </div>
 
-                <!-- BOTONES CENTRADOS, 40% ANCHO -->
-                <div class="text-center space-y-8 md:space-y-0 md:space-x-12 mt-12">
-                    <button type="submit" name="guardar" 
-                            class="inline-block w-full max-w-xs bg-gradient-to-r from-green-600 to-green-500 text-white px-20 py-8 rounded-full text-xl font-bold hover:from-green-700 hover:to-green-600 shadow-2xl transform hover:scale-105 transition">
-                        GUARDAR CONFIGURACIÓN
-                    </button>
-                    <button type="submit" name="probar" 
-                            class="inline-block w-full max-w-xs bg-gradient-to-r from-orange-600 to-orange-500 text-white px-20 py-8 rounded-full text-xl font-bold hover:from-orange-700 hover:to-orange-600 shadow-2xl transform hover:scale-105 transition">
-                        PROBAR ENVÍO
+                <div class="pt-4">
+                    <button
+                        type="submit"
+                        class="inline-flex items-center px-6 py-3 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm shadow-lg">
+                        Guardar configuración
                     </button>
                 </div>
             </form>
         </div>
+    </div>
 
-        <div class="text-center mt-12">
-            <a href="mantenimiento.php" class="text-blue-300 hover:text-white text-xl underline">
-                Volver al Mantenimiento
-            </a>
+    <!-- Envío de prueba -->
+    <div>
+        <div class="bg-white rounded-2xl shadow-2xl p-6">
+            <h2 class="text-xl font-bold text-blue-900 mb-3">Enviar correo de prueba</h2>
+            <p class="text-sm text-slate-600 mb-4">
+                Envía un correo de prueba usando la configuración actual para verificar que todo esté correcto.
+            </p>
+
+            <form method="POST" class="space-y-3">
+                <input type="hidden" name="action" value="test">
+
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">
+                        Correo de prueba
+                    </label>
+                    <input
+                        type="email"
+                        name="test_email"
+                        class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="tucorreo@ejemplo.com">
+                </div>
+
+                <button
+                    type="submit"
+                    class="inline-flex items-center px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm shadow">
+                    Enviar prueba
+                </button>
+            </form>
         </div>
     </div>
 </div>
 
-<?php 
+<?php
+require 'footer.php';
 ob_end_flush();
-require 'footer.php'; 
-?>
