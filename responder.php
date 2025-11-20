@@ -3,12 +3,13 @@ ob_start();
 
 require __DIR__ . '/config.php';
 require __DIR__ . '/app/bootstrap.php';
+require __DIR__ . '/config_email.php';
 
 use App\Models\TicketModel;
 
 require 'header.php'; // abre el layout y carga $user
 
-// --- Verificar sesión de usuario de forma amigable ---
+// --- Verificar sesión de usuario ---
 if (!isset($user) || !is_array($user) || empty($user['email'])) {
     header('Location: login.php');
     exit();
@@ -43,29 +44,6 @@ $numero = $ticket['numero'] ?? ('TCK-' . str_pad($ticket['id'], 5, '0', STR_PAD_
 // --- Cargar respuestas existentes ---
 $respuestas = TicketModel::getResponsesForTicket($ticketId);
 
-// --- Config de correo (defaults + DB) ---
-$config_email = [
-    'smtp_host'            => '',
-    'smtp_port'            => 587,
-    'smtp_usuario'         => '',
-    'smtp_clave'           => '',
-    'smtp_encriptacion'    => 'tls',
-    'smtp_from_email'      => 'soporte@sansouci.com.do',
-    'smtp_from_name'       => 'Sansouci Desk',
-    'correos_notificacion' => '',
-    'activado'             => 0,
-];
-
-try {
-    $stmt = $pdo->query("SELECT * FROM config_email WHERE id = 1");
-    $row  = $stmt->fetch(PDO::FETCH_ASSOC);
-    if (is_array($row)) {
-        $config_email = array_merge($config_email, $row);
-    }
-} catch (\Throwable $e) {
-    // No romper la página si la tabla/config no existe aún.
-}
-
 // --- Procesar envío de respuesta ---
 $mensajeFlash = '';
 
@@ -87,79 +65,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['respuesta'])) {
             $stmt = $pdo->prepare("UPDATE tickets SET actualizado_el = NOW() WHERE id = ?");
             $stmt->execute([$ticketId]);
 
-            // Enviar correo solo si hay configuración válida y está activado
-            if (!empty($config_email['smtp_usuario']) &&
-                !empty($config_email['smtp_clave']) &&
-                !empty($config_email['activado'])) {
+            // ====== ENVÍO DE CORREO AL CLIENTE ======
+            $subject = "Re: Ticket #{$numero} - {$ticket['asunto']}";
 
-                require __DIR__ . '/phpmailer/src/Exception.php';
-                require __DIR__ . '/phpmailer/src/PHPMailer.php';
-                require __DIR__ . '/phpmailer/src/SMTP.php';
+            $bodyHtml = "
+                <div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#111'>
+                    <h2 style='color:#003087'>Respuesta a tu ticket {$numero}</h2>
+                    <p><strong>Asunto:</strong> " . htmlspecialchars($ticket['asunto']) . "</p>
+                    <p><strong>Mensaje original:</strong><br>" . nl2br(htmlspecialchars($ticket['mensaje'])) . "</p>
+                    <hr style='margin:16px 0'>
+                    <p><strong>Respuesta del agente:</strong><br>" . nl2br(htmlspecialchars($respuesta)) . "</p>
+                    <p style='margin-top:24px'>Puedes responder a este correo si necesitas más ayuda.</p>
+                </div>
+            ";
 
-                $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
-
-                try {
-                    $mail->isSMTP();
-                    $mail->Host       = $config_email['smtp_host'];
-                    $mail->SMTPAuth   = true;
-                    $mail->Username   = $config_email['smtp_usuario'];
-                    $mail->Password   = $config_email['smtp_clave'];
-
-                    if (!empty($config_email['smtp_encriptacion']) && $config_email['smtp_encriptacion'] !== 'none') {
-                        $mail->SMTPSecure = $config_email['smtp_encriptacion'];
-                    }
-
-                    $mail->Port    = (int) $config_email['smtp_port'];
-                    $mail->CharSet = 'UTF-8';
-
-                    $fromEmail = $config_email['smtp_from_email'] ?: $config_email['smtp_usuario'];
-                    $fromName  = $config_email['smtp_from_name'] ?: 'Sansouci Desk';
-
-                    $mail->setFrom($fromEmail, $fromName);
-                    $mail->addReplyTo($fromEmail, 'Sansouci Desk');
-                    $mail->addAddress($ticket['cliente_email']);
-
-                    // BCC adicionales
-                    $destinos = array_filter(array_map('trim', explode(',', $config_email['correos_notificacion'] ?? '')));
-                    foreach ($destinos as $to) {
-                        if ($to && $to !== $ticket['cliente_email']) {
-                            $mail->addBCC($to);
-                        }
-                    }
-
-                    $mail->isHTML(true);
-                    $mail->Subject = "Re: Ticket #{$numero} - {$ticket['asunto']}";
-
-                    $bodyHtml = "
-                        <div style='font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#111'>
-                            <h2 style='color:#003087'>Respuesta a tu ticket {$numero}</h2>
-                            <p><strong>Asunto:</strong> " . htmlspecialchars($ticket['asunto']) . "</p>
-                            <p><strong>Mensaje original:</strong><br>" . nl2br(htmlspecialchars($ticket['mensaje'])) . "</p>
-                            <hr style='margin:16px 0'>
-                            <p><strong>Respuesta del agente:</strong><br>" . nl2br(htmlspecialchars($respuesta)) . "</p>
-                            <p style='margin-top:24px'>Puedes responder a este correo si necesitas más ayuda.</p>
-                        </div>
-                    ";
-
-                    $bodyText = "Respuesta a tu ticket {$numero}\n\n"
-                              . "Asunto: {$ticket['asunto']}\n\n"
-                              . "Mensaje original:\n{$ticket['mensaje']}\n\n"
-                              . "Respuesta del agente:\n{$respuesta}\n";
-
-                    $mail->Body    = $bodyHtml;
-                    $mail->AltBody = $bodyText;
-
-                    $mail->send();
-                } catch (\Throwable $e) {
-                    // Si falla el correo, no rompemos la app.
-                }
-            }
+            // reply-to al agente que responde
+            sendSupportMail(
+                $ticket['cliente_email'],
+                $subject,
+                $bodyHtml,
+                $user['email'],
+                $user['nombre'] ?? $user['email']
+            );
 
             // Reload de respuestas para incluir la nueva
             $respuestas   = TicketModel::getResponsesForTicket($ticketId);
             $mensajeFlash = 'Respuesta enviada correctamente';
         } catch (\Throwable $e) {
-            $mensajeFlash = 'Ocurrió un problema al guardar la respuesta.';
+            $mensajeFlash = 'Ocurrió un problema al guardar o enviar la respuesta.';
         }
     }
 }

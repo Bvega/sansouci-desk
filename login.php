@@ -1,88 +1,156 @@
 <?php
+// login.php
+
 require __DIR__ . '/config.php';
-require __DIR__ . '/app/bootstrap.php';
 
-use App\Models\UserModel;
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
-$pageTitle = 'Iniciar sesión';
+// Si ya está logueado, ir directo al dashboard
+if (isset($_SESSION['user']) && is_array($_SESSION['user'])) {
+    header('Location: dashboard.php');
+    exit();
+}
+
 $errors = [];
+$email = $_POST['email'] ?? '';
+$password = $_POST['password'] ?? '';
 
-// Ruta del dashboard
-define('ADMIN_DASHBOARD_PATH', 'dashboard.php');
-
-// Procesar envío
+// Manejo de login
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email    = isset($_POST['email']) ? trim($_POST['email']) : '';
-    $password = $_POST['password'] ?? '';
-
-    if ($email === '' || $password === '') {
-        $errors[] = 'Por favor, complete ambos campos.';
+    if (trim($email) === '' || trim($password) === '') {
+        $errors[] = 'Correo y contraseña son obligatorios.';
     } else {
-        $user = UserModel::verifyLogin($email, $password);
+        $stmt = $pdo->prepare("SELECT * FROM users WHERE email = ? LIMIT 1");
+        $stmt->execute([$email]);
+        $userRow = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if (!$user) {
-            $errors[] = 'Correo o contraseña incorrectos.';
+        if ($userRow) {
+            $hash = $userRow['password'] ?? '';
+
+            $valid = false;
+
+            // 1) password_hash
+            if ($hash && password_get_info($hash)['algo'] !== 0) {
+                $valid = password_verify($password, $hash);
+            }
+
+            // 2) texto plano
+            if (!$valid && $password === $hash) {
+                $valid = true;
+            }
+
+            // 3) md5 heredado
+            if (!$valid && $hash === md5($password)) {
+                $valid = true;
+            }
+
+            if ($valid) {
+                $_SESSION['user'] = [
+                    'id'     => $userRow['id'],
+                    'nombre' => $userRow['nombre'] ?? $userRow['email'],
+                    'email'  => $userRow['email'],
+                    'rol'    => $userRow['rol'] ?? 'agente',
+                ];
+
+                header('Location: dashboard.php');
+                exit();
+            } else {
+                $errors[] = 'Credenciales inválidas. Verifica correo y contraseña.';
+            }
         } else {
-            // Nueva sesión
-            $_SESSION['user_id']    = $user['id'] ?? null;
-            $_SESSION['user_name']  = $user['nombre'] ?? '';
-            $_SESSION['user_email'] = $user['email'] ?? '';
-            $_SESSION['user_role']  = $user['rol'] ?? '';
-
-            // Compatibilidad
-            $_SESSION['user'] = [
-                'id'     => $user['id'] ?? null,
-                'nombre' => $user['nombre'] ?? '',
-                'email'  => $user['email'] ?? '',
-                'rol'    => $user['rol'] ?? '',
-            ];
-
-            header('Location: ' . ADMIN_DASHBOARD_PATH);
-            exit;
+            $errors[] = 'Usuario no encontrado.';
         }
     }
 }
-
-include __DIR__ . '/header.php';
 ?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Ingresar - Sansouci Desk</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    </style>
+</head>
+<body class="min-h-screen bg-slate-900 flex items-center justify-center px-4">
+    <div class="w-full max-w-md">
+        <div class="bg-white rounded-3xl shadow-2xl p-8 sm:p-10">
+            <div class="mb-6 text-center">
+                <img
+                    src="https://www.sansouci.com.do/wp-content/uploads/2020/06/logo-sansouci.png"
+                    alt="Sansouci"
+                    class="h-16 mx-auto mb-3"
+                >
+                <h1 class="text-2xl sm:text-3xl font-bold text-slate-900 mb-1">
+                    Sansouci Desk
+                </h1>
+                <p class="text-sm text-slate-500">
+                    Panel interno de atención a tickets
+                </p>
+            </div>
 
-<h2 class="text-2xl font-bold mb-6">Acceso al Panel</h2>
+            <?php if (!empty($errors)): ?>
+                <div class="mb-4 px-4 py-3 rounded-xl bg-red-100 text-red-800 text-sm">
+                    <ul class="list-disc list-inside">
+                        <?php foreach ($errors as $err): ?>
+                            <li><?= htmlspecialchars($err) ?></li>
+                        <?php endforeach; ?>
+                    </ul>
+                </div>
+            <?php endif; ?>
 
-<?php if (!empty($errors)): ?>
-    <div class="mb-4 p-3 rounded bg-red-100 text-red-800">
-        <?php foreach ($errors as $error): ?>
-            <div><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
-        <?php endforeach; ?>
+            <form method="POST" class="space-y-5 mb-4">
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">
+                        Correo
+                    </label>
+                    <input
+                        type="email"
+                        name="email"
+                        value="<?= htmlspecialchars($email) ?>"
+                        class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="tu.correo@empresa.com"
+                        required
+                    >
+                </div>
+
+                <div>
+                    <label class="block text-sm font-semibold text-slate-700 mb-1">
+                        Contraseña
+                    </label>
+                    <input
+                        type="password"
+                        name="password"
+                        class="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        placeholder="••••••••"
+                        required
+                    >
+                </div>
+
+                <button
+                    type="submit"
+                    class="w-full inline-flex items-center justify-center rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-semibold py-2.5 text-sm shadow-lg"
+                >
+                    Iniciar sesión
+                </button>
+            </form>
+
+            <!-- Botón de acceso al Portal de Clientes -->
+            <a
+                href="portal_cliente.php"
+                class="w-full inline-flex items-center justify-center rounded-xl border border-slate-300 text-slate-700 font-semibold py-2.5 text-sm hover:bg-slate-50 transition"
+            >
+                Acceder al Portal de Clientes
+            </a>
+
+            <p class="mt-4 text-[11px] text-center text-slate-400">
+                © <?= date('Y') ?> Sansouci Puerto de Santo Domingo
+            </p>
+        </div>
     </div>
-<?php endif; ?>
-
-<form method="post" action="login.php" class="space-y-4 max-w-md">
-    <div>
-        <label for="email" class="block font-semibold mb-1">Correo electrónico</label>
-        <input
-            type="email"
-            id="email"
-            name="email"
-            required
-            class="w-full border rounded px-3 py-2"
-            value="<?= isset($email) ? htmlspecialchars($email, ENT_QUOTES, 'UTF-8') : '' ?>"
-        >
-    </div>
-
-    <div>
-        <label for="password" class="block font-semibold mb-1">Contraseña</label>
-        <input
-            type="password"
-            id="password"
-            name="password"
-            required
-            class="w-full border rounded px-3 py-2"
-        >
-    </div>
-
-    <button type="submit" class="px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700">
-        Iniciar sesión
-    </button>
-</form>
-
-<?php include __DIR__ . '/footer.php'; ?>
+</body>
+</html>

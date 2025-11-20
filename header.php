@@ -1,40 +1,38 @@
 <?php
-// =======================================
-//  HEADER GLOBAL SANSOUCI DESK
-// =======================================
 
+// --- Compatibilidad de sesión para evitar warnings cuando no hay usuario logueado ---
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-require __DIR__ . '/config.php';
-
-// Página actual (ej: 'login.php', 'dashboard.php', etc.)
-$current_page = basename($_SERVER['PHP_SELF']);
-
-// Páginas públicas que NO requieren login
-$public_pages = ['login.php', 'logout.php', 'index.php', 'portal_cliente.php'];
-
-// Reconstruir $user desde la sesión si es necesario
-$user = $_SESSION['user'] ?? null;
-
-if ($user === null && isset($_SESSION['user_id'])) {
-    $user = [
-        'id'     => $_SESSION['user_id'] ?? null,
-        'nombre' => $_SESSION['user_name'] ?? '',
+// Si el sistema viejo usa $_SESSION['usuario'], nos aseguramos de que sea un array válido
+if (!isset($_SESSION['usuario']) || !is_array($_SESSION['usuario'])) {
+    $_SESSION['usuario'] = [
+        'nombre' => $_SESSION['user_name'] ?? 'Invitado',
         'email'  => $_SESSION['user_email'] ?? '',
         'rol'    => $_SESSION['user_role'] ?? '',
     ];
-    $_SESSION['user'] = $user;
 }
 
-// Proteger páginas internas (dashboard, tickets, etc.)
-if (!in_array($current_page, $public_pages) && !isset($_SESSION['user'])) {
+// Por si el header trabaja con una variable $usuario
+$usuario = $_SESSION['usuario'];
+// --- Fin bloque compatibilidad ---
+
+// INICIAR SESIÓN SOLO UNA VEZ
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+require 'config.php';
+
+// PROTEGER PÁGINAS: SI NO ESTÁ LOGUEADO → LOGIN
+$current_page = basename($_SERVER['PHP_SELF']);
+if (!isset($_SESSION['user']) && !in_array($current_page, ['login.php', 'logout.php'])) {
     header('Location: login.php');
-    exit;
+    exit();
 }
 
-// A partir de aquí, $user puede ser null (por ejemplo en login.php)
+$user = $_SESSION['user'] ?? null;
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -58,80 +56,89 @@ if (!in_array($current_page, $public_pages) && !isset($_SESSION['user'])) {
     <div class="sidebar w-80 text-white flex flex-col shadow-2xl">
         <!-- Logo y Título -->
         <div class="p-8 text-center border-b border-blue-800">
-            <img src="https://www.sansouci.com.do/wp-content/uploads/2020/06/logo-sansouci.png" 
+            <img src="https://www.sansouci.com.do/wp-content/uploads/2020/06/logo-sansouci.png"
                  alt="Sansouci" class="h-20 mx-auto logo-shadow">
             <h1 class="text-3xl font-bold mt-4">SANSOUCI DESK</h1>
             <p class="text-blue-200 text-sm">Puerto de Santo Domingo</p>
         </div>
 
-        <!-- Navegación -->
+        <!-- Navegación principal -->
         <nav class="flex-1 p-6 space-y-3">
-            <a href="dashboard.php" 
+            <a href="dashboard.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='dashboard.php'?'nav-active':'' ?>">
                 <i class="fas fa-tachometer-alt mr-4 text-2xl"></i> Dashboard
             </a>
 
-            <a href="tickets.php" 
+            <a href="tickets.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='tickets.php'?'nav-active':'' ?>">
                 <i class="fas fa-ticket-alt mr-4 text-2xl"></i> Tickets
             </a>
 
-            <!-- REPORTES → visible para todos los logueados -->
-            <a href="reportes.php" 
+            <a href="reportes.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='reportes.php'?'nav-active':'' ?>">
                 <i class="fas fa-chart-bar mr-4 text-2xl"></i> Reportes
             </a>
 
-            <!-- MANTENIMIENTO → solo admin / superadmin -->
+            <!-- Mantenimiento → solo admin/superadmin -->
             <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="mantenimiento.php" 
+            <a href="mantenimiento.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='mantenimiento.php'?'nav-active':'' ?>">
                 <i class="fas fa-tools mr-4 text-2xl"></i> Mantenimiento
             </a>
             <?php endif; ?>
 
-            <div class="my-8"></div>
+            <!-- ESPACIADOR VISUAL -->
+            <div class="my-6"></div>
 
-            <!-- CONFIG CORREO → solo admin / superadmin -->
-            <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="config_correo.php" 
-               class="nav-item block py-6 px-10 rounded-2xl text-2xl font-bold flex items-center shadow-lg hover:shadow-2xl transition-all duration-300 
+            <!-- CONFIGURACIÓN DE CORREO -->
+            <?php if ($user && in_array($user['rol'], ['administrador','superadmin'])): ?>
+            <a href="config_correo.php"
+               class="nav-item block py-6 px-10 rounded-2xl text-2xl font-bold flex items-center shadow-lg hover:shadow-2xl transition-all duration-300
                       <?= $current_page=='config_correo.php'?'bg-gradient-to-r from-yellow-500 to-orange-500 text-white shadow-2xl scale-105':'bg-white text-blue-900 hover:bg-blue-50' ?>">
-                <i class="fas fa-envelope-open-text mr-6 text-3xl"></i> 
+                <i class="fas fa-envelope-open-text mr-6 text-3xl"></i>
                 <span>Config. Correo</span>
             </a>
             <?php endif; ?>
 
-            <!-- PLANTILLAS → admin / superadmin / agente -->
-            <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin', 'agente'])): ?>
-            <a href="plantillas.php" 
-               class="nav-item block py-6 px-10 rounded-2xl text-2xl font-bold flex items-center shadow-lg hover:shadow-2xl transition-all duration-300 
+            <!-- PLANTILLAS DE RESPUESTA -->
+            <?php if ($user && in_array($user['rol'], ['administrador','superadmin','agente'])): ?>
+            <a href="plantillas.php"
+               class="nav-item block py-6 px-10 rounded-2xl text-2xl font-bold flex items-center shadow-lg hover:shadow-2xl transition-all duration-300
                       <?= $current_page=='plantillas.php'?'bg-gradient-to-r from-green-500 to-teal-500 text-white shadow-2xl scale-105':'bg-white text-blue-900 hover:bg-blue-50' ?>">
-                <i class="fas fa-bolt mr-6 text-3xl"></i> 
+                <i class="fas fa-bolt mr-6 text-3xl"></i>
                 <span>Respuestas Rápidas</span>
             </a>
             <?php endif; ?>
 
-            <div class="my-8"></div>
+            <!-- BOTÓN NUEVO: PORTAL CLIENTES (abre en otra pestaña) -->
+            <a href="portal_cliente.php" target="_blank"
+               class="nav-item block mt-4 py-5 px-10 rounded-2xl text-xl font-bold flex items-center shadow-lg hover:shadow-2xl transition-all duration-300
+                      bg-white text-blue-900 hover:bg-blue-50">
+                <i class="fas fa-external-link-alt mr-4 text-2xl"></i>
+                <span>Portal Clientes</span>
+            </a>
 
-            <!-- TIPOS SERVICIO → solo admin / superadmin -->
+            <!-- ESPACIADOR VISUAL -->
+            <div class="my-6"></div>
+
+            <!-- Tipos de servicio → solo admin/superadmin -->
             <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="tipos_servicio.php" 
+            <a href="tipos_servicio.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='tipos_servicio.php'?'nav-active':'' ?>">
                 <i class="fas fa-list-alt mr-4 text-2xl"></i> Tipos de Servicio
             </a>
             <?php endif; ?>
 
-            <!-- ASIGNACIÓN AUTOMÁTICA → solo admin / superadmin -->
+            <!-- Asignación automática → solo admin/superadmin -->
             <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="asignacion_tickets.php" 
+            <a href="asignacion_tickets.php"
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='asignacion_tickets.php'?'nav-active':'' ?>">
                 <i class="fas fa-user-cog mr-4 text-2xl"></i> Asignación Automática
             </a>
             <?php endif; ?>
         </nav>
 
-        <!-- Usuario & Logout -->
+        <!-- Usuario y Cerrar sesión -->
         <div class="p-6 border-t border-blue-800">
             <?php if ($user): ?>
             <div class="flex items-center space-x-4 mb-6">
@@ -139,15 +146,15 @@ if (!in_array($current_page, $public_pages) && !isset($_SESSION['user'])) {
                     <i class="fas fa-user text-3xl"></i>
                 </div>
                 <div>
-                    <p class="font-bold text-xl"><?= htmlspecialchars($user['nombre'] ?? '', ENT_QUOTES, 'UTF-8') ?></p>
+                    <p class="font-bold text-xl"><?= htmlspecialchars($user['nombre']) ?></p>
                     <p class="text-sm text-blue-200">
-                        <?= ($user['rol'] ?? '') === 'superadmin' ? 'Super Admin' : ucfirst($user['rol'] ?? '') ?>
+                        <?= $user['rol'] == 'superadmin' ? 'Super Admin' : ucfirst($user['rol']) ?>
                     </p>
                 </div>
             </div>
             <?php endif; ?>
 
-            <a href="logout.php" 
+            <a href="logout.php"
                class="block text-center bg-red-600 hover:bg-red-700 py-4 rounded-xl font-bold text-xl transition shadow-lg">
                 <i class="fas fa-sign-out-alt mr-3"></i> Cerrar Sesión
             </a>
@@ -157,3 +164,4 @@ if (!in_array($current_page, $public_pages) && !isset($_SESSION['user'])) {
     <!-- CONTENIDO PRINCIPAL -->
     <div class="flex-1 p-10">
         <div class="bg-white rounded-3xl shadow-2xl p-10 min-h-screen">
+            <!-- Aquí va el contenido de cada página -->

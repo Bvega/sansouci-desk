@@ -1,6 +1,7 @@
 <?php
 ob_start();
 require __DIR__ . '/config.php';
+require __DIR__ . '/config_email.php'; // para loadEmailConfig() y sendSupportMail()
 
 // --- Manejo de formulario ---
 $errors = [];
@@ -44,13 +45,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mensaje
             ]);
 
-            $ticketId = (int) $pdo->lastInsertId();
+            $ticketId     = (int) $pdo->lastInsertId();
+            $ticketNumber = 'TCK-' . str_pad($ticketId, 5, '0', STR_PAD_LEFT);
 
             // Limpiar campos
             $cliente_email = $asunto = $mensaje = '';
 
-            $successMessage = "Tu solicitud ha sido enviada correctamente. Número de referencia: TCK-" .
-                str_pad($ticketId, 5, '0', STR_PAD_LEFT) . ".";
+            $successMessage = "Tu solicitud ha sido enviada correctamente. Número de referencia: {$ticketNumber}.";
+
+            // ====== ENVÍO DE CORREOS ======
+
+            // 1) Correo al cliente (acuse de recibo)
+            $subjectClient = "Hemos recibido tu solicitud ({$ticketNumber})";
+            $bodyClient = "
+                <p>Hola,</p>
+                <p>Hemos recibido tu solicitud en <strong>Sansouci Desk</strong>.</p>
+                <p><strong>Número de ticket:</strong> {$ticketNumber}</p>
+                <p><strong>Asunto:</strong> " . htmlspecialchars($asunto) . "</p>
+                <p>En breve nuestro equipo revisará tu caso y te responderá a este mismo correo.</p>
+                <p>Gracias por contactarnos.</p>
+            ";
+            // Usamos el helper central
+            sendSupportMail($cliente_email, $subjectClient, $bodyClient);
+
+            // 2) Aviso interno (a la cuenta configurada en config_correo)
+            $cfg = loadEmailConfig($pdo);
+            if (!empty($cfg['from_email'])) {
+                $subjectInternal = "Nuevo ticket desde Portal Clientes ({$ticketNumber})";
+                $bodyInternal = "
+                    <p>Se ha creado un nuevo ticket desde el portal de clientes.</p>
+                    <p><strong>Número:</strong> {$ticketNumber}</p>
+                    <p><strong>Cliente:</strong> {$cliente_email}</p>
+                    <p><strong>Asunto:</strong> " . htmlspecialchars($asunto) . "</p>
+                    <p><strong>Mensaje:</strong><br>" . nl2br(htmlspecialchars($mensaje)) . "</p>
+                ";
+                sendSupportMail($cfg['from_email'], $subjectInternal, $bodyInternal);
+            }
 
         } catch (Throwable $e) {
             $errors[] = 'Ocurrió un problema al enviar tu solicitud. Inténtalo nuevamente más tarde.';
