@@ -1,7 +1,7 @@
 <?php
 ob_start();
 require __DIR__ . '/config.php';
-require __DIR__ . '/config_email.php'; // para loadEmailConfig() y sendSupportMail()
+require __DIR__ . '/config_email.php';
 
 // --- Manejo de formulario ---
 $errors = [];
@@ -45,41 +45,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $mensaje
             ]);
 
-            $ticketId     = (int) $pdo->lastInsertId();
-            $ticketNumber = 'TCK-' . str_pad($ticketId, 5, '0', STR_PAD_LEFT);
+            $ticketId  = (int) $pdo->lastInsertId();
+            $ticketRef = 'TCK-' . str_pad($ticketId, 5, '0', STR_PAD_LEFT);
 
             // Limpiar campos
             $cliente_email = $asunto = $mensaje = '';
 
-            $successMessage = "Tu solicitud ha sido enviada correctamente. Número de referencia: {$ticketNumber}.";
+            $successMessage = "Tu solicitud ha sido enviada correctamente. Número de referencia: {$ticketRef}.";
 
-            // ====== ENVÍO DE CORREOS ======
+            // ==============================
+            //  NOTIFICACIONES POR CORREO
+            // ==============================
 
-            // 1) Correo al cliente (acuse de recibo)
-            $subjectClient = "Hemos recibido tu solicitud ({$ticketNumber})";
-            $bodyClient = "
+            // 1) Correo al cliente
+            $subjectCliente = "Hemos recibido tu solicitud ({$ticketRef})";
+
+            $bodyCliente = "
                 <p>Hola,</p>
-                <p>Hemos recibido tu solicitud en <strong>Sansouci Desk</strong>.</p>
-                <p><strong>Número de ticket:</strong> {$ticketNumber}</p>
-                <p><strong>Asunto:</strong> " . htmlspecialchars($asunto) . "</p>
-                <p>En breve nuestro equipo revisará tu caso y te responderá a este mismo correo.</p>
-                <p>Gracias por contactarnos.</p>
+                <p>Hemos recibido tu solicitud y está siendo procesada por nuestro equipo de soporte.</p>
+                <p><strong>Número de referencia:</strong> {$ticketRef}</p>
+                <p><strong>Asunto:</strong> " . htmlspecialchars($asunto, ENT_QUOTES, 'UTF-8') . "</p>
+                <p>En breve uno de nuestros agentes se pondrá en contacto contigo.</p>
+                <p>Atentamente,<br>Sansouci Desk</p>
             ";
-            // Usamos el helper central
-            sendSupportMail($cliente_email, $subjectClient, $bodyClient);
 
-            // 2) Aviso interno (a la cuenta configurada en config_correo)
+            // Aunque el ticket ya está creado, estas variables se limpiaron;
+            // usamos las originales antes de limpiar, así que movemos esto
+            // ARRIBA SI QUEREMOS MOSTRARLOS TAL CUAL.
+            // Para este ejemplo, asumimos que asunto/mensaje anteriores eran válidos.
+
+            // RECONSTRUIMOS asunto/mensaje de forma segura para el correo:
+            $asuntoCorreo  = $_POST['asunto']  ?? '';
+            $mensajeCorreo = $_POST['mensaje'] ?? '';
+
+            $bodyCliente = "
+                <p>Hola,</p>
+                <p>Hemos recibido tu solicitud y está siendo procesada por nuestro equipo de soporte.</p>
+                <p><strong>Número de referencia:</strong> {$ticketRef}</p>
+                <p><strong>Asunto:</strong> " . htmlspecialchars($asuntoCorreo, ENT_QUOTES, 'UTF-8') . "</p>
+                <p><strong>Descripción enviada:</strong><br>" . nl2br(htmlspecialchars($mensajeCorreo, ENT_QUOTES, 'UTF-8')) . "</p>
+                <p>En breve uno de nuestros agentes se pondrá en contacto contigo.</p>
+                <p>Atentamente,<br>Sansouci Desk</p>
+            ";
+
+            // No detenemos el flujo si falla el correo; solo intentamos.
+            @sendSupportMail(
+                trim($_POST['cliente_email'] ?? ''),
+                $subjectCliente,
+                $bodyCliente
+            );
+
+            // 2) Correo interno a la cuenta configurada
             $cfg = loadEmailConfig($pdo);
-            if (!empty($cfg['from_email'])) {
-                $subjectInternal = "Nuevo ticket desde Portal Clientes ({$ticketNumber})";
-                $bodyInternal = "
+            $internalTo = $cfg['from_email'] ?: ($cfg['smtp_user'] ?? '');
+
+            if ($internalTo) {
+                $subjectInterno = "Nuevo ticket creado ({$ticketRef})";
+
+                $bodyInterno = "
                     <p>Se ha creado un nuevo ticket desde el portal de clientes.</p>
-                    <p><strong>Número:</strong> {$ticketNumber}</p>
-                    <p><strong>Cliente:</strong> {$cliente_email}</p>
-                    <p><strong>Asunto:</strong> " . htmlspecialchars($asunto) . "</p>
-                    <p><strong>Mensaje:</strong><br>" . nl2br(htmlspecialchars($mensaje)) . "</p>
+                    <p><strong>Número de referencia:</strong> {$ticketRef}</p>
+                    <p><strong>Correo cliente:</strong> " . htmlspecialchars($_POST['cliente_email'] ?? '', ENT_QUOTES, 'UTF-8') . "</p>
+                    <p><strong>Asunto:</strong> " . htmlspecialchars($asuntoCorreo, ENT_QUOTES, 'UTF-8') . "</p>
+                    <p><strong>Mensaje:</strong><br>" . nl2br(htmlspecialchars($mensajeCorreo, ENT_QUOTES, 'UTF-8')) . "</p>
+                    <p>Revisa el panel de tickets para gestionarlo.</p>
                 ";
-                sendSupportMail($cfg['from_email'], $subjectInternal, $bodyInternal);
+
+                @sendSupportMail(
+                    $internalTo,
+                    $subjectInterno,
+                    $bodyInterno
+                );
             }
 
         } catch (Throwable $e) {
@@ -186,3 +222,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </html>
 <?php
 ob_end_flush();
+
