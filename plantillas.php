@@ -1,167 +1,296 @@
-<?php 
+<?php
 ob_start();
-require 'config.php';
-require 'header.php'; // ← AQUÍ SE CARGA $user
+require 'header.php'; // aquí ya tenemos $pdo y $user
 
-// VERIFICAR QUE EL USUARIO ESTÉ LOGUEADO Y TENGA PERMISO
-if(!isset($user) || !in_array($user['rol'],['administrador','superadmin','agente'])) { 
-    die('<div class="p-20 text-center text-red-600 text-5xl font-bold bg-white rounded-3xl shadow-3xl">Acceso denegado. Solo administradores y agentes.</div>'); 
+if (!$user) {
+    header('Location: login.php');
+    exit();
 }
 
-// === CREAR / EDITAR PLANTILLA ===
-$mensaje = '';
-$error = '';
-$editar = null;
+$mensaje_error = '';
+$mensaje_ok    = '';
+$modo_edicion  = false;
+$plantilla_editar = [
+    'id'        => 0,
+    'titulo'    => '',
+    'contenido' => '',
+];
 
-if($_POST){
-    $titulo = trim($_POST['titulo'] ?? '');
-    $mensaje_plantilla = trim($_POST['mensaje'] ?? '');
-    $id = intval($_POST['id'] ?? 0);
+/* ===============================
+   1. PROCESAR ACCIONES (POST/GET)
+   =============================== */
 
-    if(empty($titulo) || empty($mensaje_plantilla)){
-        $error = "Título y mensaje son obligatorios";
+// Guardar / actualizar plantilla
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'guardar') {
+    $id        = isset($_POST['id']) ? (int)$_POST['id'] : 0;
+    $titulo    = trim($_POST['titulo'] ?? '');
+    $contenido = trim($_POST['contenido'] ?? '');
+
+    if ($titulo === '' || $contenido === '') {
+        $mensaje_error = 'El título y el contenido son obligatorios.';
     } else {
-        try {
-            if($id > 0){
-                $stmt = $pdo->prepare("UPDATE plantillas_respuesta SET titulo=?, mensaje=? WHERE id=?");
-                $stmt->execute([$titulo, $mensaje_plantilla, $id]);
-                $mensaje = "Plantilla actualizada correctamente";
-            } else {
-                $stmt = $pdo->prepare("INSERT INTO plantillas_respuesta (titulo, mensaje, creado_por) VALUES (?, ?, ?)");
-                $stmt->execute([$titulo, $mensaje_plantilla, $user['id']]);
-                $mensaje = "Plantilla creada correctamente";
-            }
-            header("Location: plantillas.php?msg=" . urlencode($mensaje));
+        if ($id > 0) {
+            // UPDATE
+            $stmt = $pdo->prepare("
+                UPDATE plantillas_respuesta
+                SET titulo = ?, contenido = ?
+                WHERE id = ?
+            ");
+            $stmt->execute([$titulo, $contenido, $id]);
+            header('Location: plantillas.php?msg=Plantilla+actualizada+correctamente');
             exit();
-        } catch(Exception $e){
-            $error = "Error: " . htmlspecialchars($e->getMessage());
+        } else {
+            // INSERT
+            $stmt = $pdo->prepare("
+                INSERT INTO plantillas_respuesta (titulo, contenido, creado_el)
+                VALUES (?, ?, NOW())
+            ");
+            $stmt->execute([$titulo, $contenido]);
+            header('Location: plantillas.php?msg=Plantilla+creada+correctamente');
+            exit();
         }
     }
 }
 
-// === ELIMINAR PLANTILLA ===
-if(isset($_GET['eliminar'])){
-    $id = intval($_GET['eliminar']);
-    try {
-        $stmt = $pdo->prepare("DELETE FROM plantillas_respuesta WHERE id=?");
+// Eliminar
+if (isset($_GET['eliminar'])) {
+    $id = (int)$_GET['eliminar'];
+    if ($id > 0) {
+        $stmt = $pdo->prepare("DELETE FROM plantillas_respuesta WHERE id = ?");
         $stmt->execute([$id]);
-        header("Location: plantillas.php?msg=Plantilla eliminada");
+        header('Location: plantillas.php?msg=Plantilla+eliminada+correctamente');
         exit();
-    } catch(Exception $e){
-        $error = "Error al eliminar: " . htmlspecialchars($e->getMessage());
     }
 }
 
-// === EDITAR PLANTILLA ===
-if(isset($_GET['editar'])){
-    $id = intval($_GET['editar']);
-    $stmt = $pdo->prepare("SELECT * FROM plantillas_respuesta WHERE id=?");
-    $stmt->execute([$id]);
-    $editar = $stmt->fetch(PDO::FETCH_ASSOC);
+// Cargar datos para edición
+if (isset($_GET['editar'])) {
+    $id = (int)$_GET['editar'];
+    if ($id > 0) {
+        $stmt = $pdo->prepare("
+            SELECT id, titulo, contenido
+            FROM plantillas_respuesta
+            WHERE id = ?
+        ");
+        $stmt->execute([$id]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $modo_edicion     = true;
+            $plantilla_editar = $row;
+        }
+    }
 }
 
-// === CARGAR TODAS LAS PLANTILLAS ===
-try {
-    $stmt = $pdo->query("SELECT p.*, u.nombre as creador FROM plantillas_respuesta p LEFT JOIN users u ON p.creado_por = u.id ORDER BY p.creado_el DESC");
-    $plantillas = $stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch(Exception $e){
-    $plantillas = [];
-    $error = "Error al cargar plantillas: " . htmlspecialchars($e->getMessage());
+// Mensaje de la URL (?msg=...)
+if (isset($_GET['msg']) && $_GET['msg'] !== '') {
+    $mensaje_ok = $_GET['msg'];
 }
+
+/* ===============================
+   2. CARGAR LISTA DE PLANTILLAS
+   =============================== */
+
+$stmt = $pdo->query("
+    SELECT id, titulo, contenido, creado_el
+    FROM plantillas_respuesta
+    ORDER BY creado_el DESC
+");
+$plantillas = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
 ?>
 
-<div class="min-h-screen bg-gradient-to-br from-blue-900 to-blue-700 py-12 px-6">
-    <div class="max-w-6xl mx-auto">
-        <h1 class="text-7xl font-bold text-white text-center mb-16 drop-shadow-2xl">
-            PLANTILLAS DE RESPUESTA RÁPIDA
-        </h1>
+<div class="space-y-8">
+    <div>
+        <h1 class="text-3xl font-bold text-blue-900">Respuestas Rápidas</h1>
+        <p class="text-gray-600 text-sm mt-1">
+            Administra plantillas de respuesta para usar al atender tickets desde el panel de
+            <span class="font-semibold">Responder</span>.
+        </p>
+    </div>
 
-        <?php if(isset($_GET['msg'])): ?>
-        <div class="bg-green-600 text-white px-20 py-12 rounded-3xl mb-16 text-4xl font-bold text-center shadow-3xl">
-            <?= htmlspecialchars($_GET['msg']) ?>
+    <?php if ($mensaje_error): ?>
+        <div class="bg-red-100 border-l-4 border-red-500 text-red-800 px-6 py-4 rounded-xl text-sm">
+            <?= htmlspecialchars($mensaje_error) ?>
         </div>
-        <?php endif; ?>
+    <?php endif; ?>
 
-        <?php if($error): ?>
-        <div class="bg-red-600 text-white px-20 py-12 rounded-3xl mb-16 text-4xl font-bold text-center shadow-3xl">
-            <?= htmlspecialchars($error) ?>
+    <?php if ($mensaje_ok): ?>
+        <div class="bg-green-100 border-l-4 border-green-500 text-green-800 px-6 py-4 rounded-xl text-sm">
+            <?= htmlspecialchars($mensaje_ok) ?>
         </div>
-        <?php endif; ?>
+    <?php endif; ?>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <!-- LISTADO DE PLANTILLAS -->
+        <div class="bg-white rounded-2xl shadow-xl p-6 flex flex-col">
+            <div class="flex items-center justify-between mb  -4">
+                <h2 class="text-xl font-bold text-blue-900">Listado de plantillas</h2>
+                <a href="plantillas.php"
+                   class="inline-flex items-center px-3 py-2 rounded-lg text-xs font-semibold bg-gray-100 hover:bg-gray-200 text-gray-700">
+                    Limpiar selección
+                </a>
+            </div>
+
+            <div class="mt-4 space-y-3 max-h-[480px] overflow-y-auto pr-1">
+                <?php if (empty($plantillas)): ?>
+                    <p class="text-gray-500 text-sm">Aún no hay plantillas creadas.</p>
+                <?php else: ?>
+                    <?php foreach ($plantillas as $p): ?>
+                        <div class="border border-gray-200 rounded-xl p-3 flex items-start justify-between bg-gray-50">
+                            <div class="mr-3">
+                                <p class="font-semibold text-sm text-blue-900">
+                                    ID #<?= (int)$p['id'] ?> ·
+                                    <?= htmlspecialchars($p['titulo']) ?>
+                                </p>
+                                <p class="text-[11px] text-gray-500 mt-1">
+                                    <?= htmlspecialchars($p['creado_el']) ?>
+                                </p>
+                            </div>
+                            <div class="flex flex-col gap-1">
+                                <a href="plantillas.php?editar=<?= (int)$p['id'] ?>"
+                                   class="px-3 py-1 text-xs rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-center">
+                                    Editar
+                                </a>
+                                <button type="button"
+                                        class="px-3 py-1 text-xs rounded-lg bg-gray-200 text-gray-800 hover:bg-gray-300 copiar-btn"
+                                        data-texto="<?= htmlspecialchars($p['contenido']) ?>">
+                                    Copiar texto
+                                </button>
+                                <a href="plantillas.php?eliminar=<?= (int)$p['id'] ?>"
+                                   onclick="return confirm('¿Eliminar esta plantilla?')"
+                                   class="px-3 py-1 text-xs rounded-lg bg-red-500 text-white hover:bg-red-600 text-center">
+                                    Eliminar
+                                </a>
+                            </div>
+                        </div>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+            </div>
+        </div>
 
         <!-- FORMULARIO CREAR / EDITAR -->
-        <div class="bg-white rounded-3xl shadow-3xl p-16 mb-20 border-12 border-blue-900">
-            <h2 class="text-5xl font-bold text-blue-900 mb-12 text-center">
-                <?= $editar ? 'EDITAR PLANTILLA' : 'NUEVA PLANTILLA' ?>
-            </h2>
-            <form method="POST" class="space-y-12">
-                <input type="hidden" name="id" value="<?= $editar['id'] ?? '' ?>">
-                <div>
-                    <label class="block text-2xl font-bold text-blue-900 mb-4">Título de la plantilla</label>
-                    <input type="text" name="titulo" value="<?= htmlspecialchars($editar['titulo'] ?? '') ?>" required 
-                           class="w-full p-8 border-6 border-blue-300 rounded-3xl text-2xl focus:border-blue-900 transition shadow-2xl">
-                </div>
-                <div>
-                    <label class="block text-2xl font-bold text-blue-900 mb-4">Mensaje (usa \n para saltos de línea)</label>
-                    <textarea name="mensaje" rows="12" required 
-                              class="w-full p-8 border-6 border-blue-300 rounded-3xl text-2xl focus:border-blue-900 transition resize-none shadow-2xl">
-<?= htmlspecialchars($editar['mensaje'] ?? '') ?>
-                    </textarea>
-                </div>
-                <div class="text-center space-x-16">
-                    <button type="submit" 
-                            class="bg-gradient-to-r from-green-600 to-green-500 text-white px-64 py-20 rounded-full text-5xl font-bold hover:from-green-700 hover:to-green-600 shadow-3xl transform hover:scale-110 transition">
-                        <?= $editar ? 'ACTUALIZAR PLANTILLA' : 'CREAR PLANTILLA' ?>
-                    </button>
-                    <?php if($editar): ?>
-                    <a href="plantillas.php" class="bg-gray-600 text-white px-64 py-20 rounded-full text-5xl font-bold hover:bg-gray-700 shadow-3xl inline-block">
-                        CANCELAR
-                    </a>
-                    <?php endif; ?>
-                </div>
-            </form>
-        </div>
+        <div class="bg-white rounded-2xl shadow-xl p-6">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-bold text-blue-900">
+                    <?= $modo_edicion ? 'Editar plantilla' : 'Crear nueva plantilla' ?>
+                </h2>
+                <?php if ($modo_edicion): ?>
+                    <span class="text-xs px-3 py-1 rounded-full bg-blue-100 text-blue-800 font-semibold">
+                        Editando ID #<?= (int)$plantilla_editar['id'] ?>
+                    </span>
+                <?php endif; ?>
+            </div>
 
-        <!-- LISTA DE PLANTILLAS -->
-        <?php if(!empty($plantillas)): ?>
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-12">
-            <?php foreach($plantillas as $p): ?>
-            <div class="bg-white rounded-3xl shadow-3xl p-12 border-12 border-teal-500 hover:border-teal-700 transition-all duration-300">
-                <div class="flex justify-between items-start mb-8">
-                    <h3 class="text-4xl font-bold text-teal-800"><?= htmlspecialchars($p['titulo']) ?></h3>
-                    <div class="space-x-6">
-                        <a href="plantillas.php?editar=<?= $p['id'] ?>" class="text-blue-600 hover:text-blue-800 text-3xl">
-                            Editar
-                        </a>
-                        <a href="plantillas.php?eliminar=<?= $p['id'] ?>" onclick="return confirm('¿Eliminar esta plantilla?')" class="text-red-600 hover:text-red-800 text-3xl">
-                            Eliminar
-                        </a>
+            <form method="POST" class="space-y-4">
+                <input type="hidden" name="accion" value="guardar">
+                <input type="hidden" name="id" value="<?= (int)$plantilla_editar['id'] ?>">
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">
+                        Título de la plantilla
+                    </label>
+                    <input
+                        type="text"
+                        name="titulo"
+                        value="<?= htmlspecialchars($plantilla_editar['titulo']) ?>"
+                        placeholder="Ej: Ticket recibido, En proceso, Resuelto, Contactar administración"
+                        class="w-full border-2 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                </div>
+
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">
+                        Contenido
+                    </label>
+                    <textarea
+                        name="contenido"
+                        rows="7"
+                        class="w-full border-2 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="Escribe el texto que quieres reutilizar al responder tickets..."
+                    ><?= htmlspecialchars($plantilla_editar['contenido']) ?></textarea>
+                </div>
+
+                <div class="flex flex-wrap items-center justify-between gap-4 pt-2 text-[11px] text-gray-500">
+                    <p>
+                        Consejo: usa un lenguaje neutro. Luego podrás copiar este texto y pegarlo en la respuesta
+                        del ticket desde el panel de <span class="font-semibold">Responder</span>.
+                    </p>
+
+                    <div class="flex gap-2">
+                        <?php if ($modo_edicion): ?>
+                            <a href="plantillas.php"
+                               class="px-4 py-2 rounded-xl bg-gray-200 text-gray-800 font-semibold text-xs hover:bg-gray-300">
+                                Cancelar edición
+                            </a>
+                        <?php endif; ?>
+                        <button type="submit"
+                                class="px-5 py-2 rounded-xl bg-green-600 text-white font-semibold text-xs hover:bg-green-700">
+                            Guardar plantilla
+                        </button>
                     </div>
                 </div>
-                <div class="bg-gray-50 p-8 rounded-2xl mb-8 border-4 border-gray-300">
-                    <p class="text-xl text-gray-700 whitespace-pre-wrap"><?= htmlspecialchars($p['mensaje']) ?></p>
-                </div>
-                <small class="text-gray-500 block text-center">
-                    Creado por: <?= htmlspecialchars($p['creador'] ?? 'Sistema') ?> 
-                    <br><?= date('d/m/Y H:i', strtotime($p['creado_el'])) ?>
-                </small>
-            </div>
-            <?php endforeach; ?>
-        </div>
-        <?php else: ?>
-        <div class="bg-yellow-100 border-8 border-yellow-600 text-yellow-800 px-20 py-16 rounded-3xl text-4xl font-bold text-center shadow-3xl">
-            No hay plantillas creadas aún
-        </div>
-        <?php endif; ?>
 
-        <div class="text-center mt-20">
-            <a href="tickets.php" class="text-blue-300 hover:text-white text-3xl underline">
-                Volver a Tickets
-            </a>
+                <!-- Variables rápidas (placeholders) -->
+                <div class="mt-4 flex flex-wrap gap-2 text-xs">
+                    <span class="text-gray-500 mr-2">Insertar variables rápidas:</span>
+                    <button type="button" class="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 insertar-placeholder"
+                            data-placeholder="{{ticket_numero}}">
+                        {{ticket_numero}}
+                    </button>
+                    <button type="button" class="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 insertar-placeholder"
+                            data-placeholder="{{ticket_asunto}}">
+                        {{ticket_asunto}}
+                    </button>
+                    <button type="button" class="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 insertar-placeholder"
+                            data-placeholder="{{cliente_email}}">
+                        {{cliente_email}}
+                    </button>
+                    <button type="button" class="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 insertar-placeholder"
+                            data-placeholder="{{estado_ticket}}">
+                        {{estado_ticket}}
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 </div>
 
-<?php 
+<script>
+// Copiar texto al portapapeles
+document.querySelectorAll('.copiar-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const texto = btn.getAttribute('data-texto') || '';
+        if (!texto) return;
+        navigator.clipboard.writeText(texto).then(() => {
+            btn.textContent = 'Copiado';
+            setTimeout(() => btn.textContent = 'Copiar texto', 1500);
+        });
+    });
+});
+
+// Insertar placeholders en el textarea de contenido
+const textareaContenido = document.querySelector('textarea[name="contenido"]');
+document.querySelectorAll('.insertar-placeholder').forEach(btn => {
+    btn.addEventListener('click', () => {
+        if (!textareaContenido) return;
+        const placeholder = btn.getAttribute('data-placeholder');
+        const start = textareaContenido.selectionStart || 0;
+        const end   = textareaContenido.selectionEnd || 0;
+        const value = textareaContenido.value;
+
+        textareaContenido.value =
+            value.substring(0, start) +
+            placeholder +
+            value.substring(end);
+
+        textareaContenido.focus();
+        textareaContenido.selectionStart = textareaContenido.selectionEnd =
+            start + placeholder.length;
+    });
+});
+</script>
+
+<?php
 ob_end_flush();
-require 'footer.php'; 
+require 'footer.php';
 ?>
+
