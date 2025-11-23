@@ -131,7 +131,7 @@ $user = $_SESSION['user'] ?? null;
 
             <!-- Asignación automática → solo admin/superadmin -->
             <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="asignacion_tickets.php"
+            <a href="config_asignacion.php" 
                class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='asignacion_tickets.php'?'nav-active':'' ?>">
                 <i class="fas fa-user-cog mr-4 text-2xl"></i> Asignación Automática
             </a>
