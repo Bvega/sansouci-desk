@@ -1,5 +1,6 @@
 <?php
-require 'config.php';
+require __DIR__ . '/config.php';
+require __DIR__ . '/config_email.php';
 
 $cliente_email = trim($_GET['email'] ?? '');
 $ticket_id     = (int)($_GET['ticket_id'] ?? 0);
@@ -22,7 +23,7 @@ if ($cliente_email !== '') {
 
 // Procesar respuesta del cliente
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $respuesta     = trim($_POST['respuesta'] ?? '');
+    $respuesta      = trim($_POST['respuesta'] ?? '');
     $ticket_id_post = (int)($_POST['ticket_id'] ?? 0);
 
     if (!$ticket_id_post) {
@@ -31,69 +32,53 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Escribe tu respuesta.";
     } else {
         try {
-            // Guardar respuesta
+            // Guardar respuesta del cliente en la tabla respuestas
             $stmt = $pdo->prepare("
                 INSERT INTO respuestas (ticket_id, mensaje, autor, autor_email, creado_el) 
                 VALUES (?, ?, 'cliente', ?, NOW())
             ");
             $stmt->execute([$ticket_id_post, $respuesta, $cliente_email]);
 
-            // Cargar config de correo
-            $cfgStmt = $pdo->query("SELECT * FROM config_email LIMIT 1");
-            $config_email = $cfgStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+            // Buscar número de ticket para el asunto del correo
+            $tStmt = $pdo->prepare("SELECT id, numero FROM tickets WHERE id = ?");
+            $tStmt->execute([$ticket_id_post]);
+            $tRow   = $tStmt->fetch(PDO::FETCH_ASSOC);
+            $numero = $tRow['numero'] ?? ('TCK-' . str_pad($ticket_id_post, 5, '0', STR_PAD_LEFT));
 
-            // Intentar envío de correo si hay configuración válida
-            if (!empty($config_email['smtp_user'])) {
-                require 'PHPMailer/src/Exception.php';
-                require 'PHPMailer/src/PHPMailer.php';
-                require 'PHPMailer/src/SMTP.php';
+            // ==============================
+            //  NOTIFICACIÓN INTERNA POR CORREO
+            // ==============================
+            $cfg        = loadEmailConfig($pdo);
+            $internalTo = $cfg['from_email'] ?: ($cfg['smtp_user'] ?? '');
 
-                $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
+            if ($internalTo) {
+                $subject = "Nueva respuesta de cliente en ticket #{$numero}";
 
-                // Buscar número de ticket para el asunto
-                $tStmt = $pdo->prepare("SELECT id, numero FROM tickets WHERE id = ?");
-                $tStmt->execute([$ticket_id_post]);
-                $tRow = $tStmt->fetch(PDO::FETCH_ASSOC);
-                $numero = $tRow['numero'] ?? ('TCK-'.str_pad($ticket_id_post, 5, '0', STR_PAD_LEFT));
+                $bodyHtml = "
+                    <div style='font-family: Arial, sans-serif; max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 15px 40px rgba(0,0,0,0.2); border: 5px solid #003087;'>
+                        <h1 style='color: #003087; text-align: center;'>NUEVA RESPUESTA DE CLIENTE</h1>
+                        <p><strong>Cliente:</strong> " . htmlspecialchars($cliente_email, ENT_QUOTES, 'UTF-8') . "</p>
+                        <p><strong>Ticket:</strong> #{$numero}</p>
+                        <hr>
+                        <p style='background: #f0f8ff; padding: 20px; border-radius: 10px;'>
+                            " . nl2br(htmlspecialchars($respuesta, ENT_QUOTES, 'UTF-8')) . "
+                        </p>
+                        <div style='text-align: center; margin: 40px 0;'>
+                            <a href='http://localhost/sansouci-desk/responder.php?ticket_id={$ticket_id_post}' 
+                               style='background: #003087; color: white; padding: 20px 50px; text-decoration: none; border-radius: 50px; font-size: 24px; font-weight: bold; display: inline-block;'>
+                               RESPONDER EN EL PANEL
+                            </a>
+                        </div>
+                    </div>
+                ";
 
-                try {
-                    $mail->isSMTP();
-                    $mail->Host       = $config_email['smtp_host'];
-                    $mail->SMTPAuth   = true;
-                    $mail->Username   = $config_email['smtp_user'];
-                    $mail->Password   = $config_email['smtp_pass'];
-                    $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
-                    $mail->Port       = (int)$config_email['smtp_port'];
-
-                    $fromEmail = $config_email['smtp_from_email'] ?: $config_email['smtp_user'];
-                    $fromName  = $config_email['smtp_from_name'] ?: 'Sansouci Desk';
-
-                    $mail->setFrom($fromEmail, $fromName);
-                    $mail->addAddress($fromEmail); // Notificar a soporte
-
-                    $mail->isHTML(true);
-                    $mail->Subject = "Nueva respuesta de cliente en ticket #{$numero}";
-                    $mail->Body    = "
-                        <div style='font-family: Arial, sans-serif; max-width: 600px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 15px 40px rgba(0,0,0,0.2); border: 5px solid #003087;'>
-                            <h1 style='color: #003087; text-align: center;'>NUEVA RESPUESTA DE CLIENTE</h1>
-                            <p><strong>Cliente:</strong> ".htmlspecialchars($cliente_email, ENT_QUOTES, 'UTF-8')."</p>
-                            <p><strong>Ticket:</strong> #{$numero}</p>
-                            <hr>
-                            <p style='background: #f0f8ff; padding: 20px; border-radius: 10px;'>
-                                ".nl2br(htmlspecialchars($respuesta, ENT_QUOTES, 'UTF-8'))."
-                            </p>
-                            <div style='text-align: center; margin: 40px 0;'>
-                                <a href='http://localhost/sansouci-desk/responder.php?ticket_id={$ticket_id_post}' 
-                                   style='background: #003087; color: white; padding: 20px 50px; text-decoration: none; border-radius: 50px; font-size: 24px; font-weight: bold; display: inline-block;'>
-                                   RESPONDER EN EL PANEL
-                                </a>
-                            </div>
-                        </div>";
-
-                    $mail->send();
-                } catch (\Exception $e) {
-                    // Silencioso si el correo falla
-                }
+                // Usamos el helper centralizado de correo
+                @sendSupportMail(
+                    $internalTo,
+                    $subject,
+                    $bodyHtml,
+                    $cliente_email // reply-to al cliente
+                );
             }
 
             // Redirigir para evitar reenvíos de formulario
