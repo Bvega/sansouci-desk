@@ -18,8 +18,10 @@ if (!isset($_SESSION['usuario']) || !is_array($_SESSION['usuario'])) {
 $usuario = $_SESSION['usuario'];
 // --- Fin bloque compatibilidad ---
 
-
-// Ya tenemos sesión arriba, no hace falta llamar de nuevo a session_start()
+// INICIAR SESIÓN SOLO UNA VEZ (ya hay session_start arriba, este segundo bloque es redundante pero inofensivo)
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 require 'config.php';
 
@@ -129,8 +131,8 @@ $user = $_SESSION['user'] ?? null;
 
             <!-- Asignación automática → solo admin/superadmin -->
             <?php if ($user && in_array($user['rol'], ['administrador', 'superadmin'])): ?>
-            <a href="config_asignacion.php" 
-               class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='config_asignacion.php'?'nav-active':'' ?>">
+            <a href="asignacion_tickets.php" 
+               class="nav-item block py-5 px-8 rounded-xl text-xl font-bold flex items-center <?= $current_page=='asignacion_tickets.php'?'nav-active':'' ?>">
                 <i class="fas fa-user-cog mr-4 text-2xl"></i> Asignación Automática
             </a>
             <?php endif; ?>
